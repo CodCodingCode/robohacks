@@ -22,7 +22,8 @@ import os
 import time
 from typing import Literal
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from vlm.prompts import recon_prompt, defusal_prompt, operator_qa_prompt
 
@@ -30,11 +31,7 @@ from vlm.prompts import recon_prompt, defusal_prompt, operator_qa_prompt
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Set via environment variable or replace with your key for testing.
-_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-# Gemini 2.5 Flash — fast and cheap, good enough for structured vision tasks.
-_MODEL = "gemini-2.5-flash-preview-04-17"
+_MODEL = "gemini-2.5-flash"
 
 # Rate limiting: minimum seconds between Gemini calls.
 _MIN_INTERVAL = 2.0
@@ -44,19 +41,18 @@ _last_call: float = 0.0
 # Client setup
 # ---------------------------------------------------------------------------
 
-_client: genai.GenerativeModel | None = None
+_client: genai.Client | None = None
 
 
-def _get_client() -> genai.GenerativeModel:
+def _get_client() -> genai.Client:
     global _client
     if _client is None:
-        api_key = _API_KEY or os.environ.get("GEMINI_API_KEY", "")
+        api_key = os.environ.get("GEMINI_API_KEY", "")
         if not api_key:
             raise RuntimeError(
                 "GEMINI_API_KEY not set. Export it or pass it in the environment."
             )
-        genai.configure(api_key=api_key)
-        _client = genai.GenerativeModel(_MODEL)
+        _client = genai.Client(api_key=api_key)
     return _client
 
 
@@ -94,6 +90,9 @@ def analyze_frame(
     raw = _call_gemini(system, user_text, image_b64)
     _last_call = time.time()
 
+    if os.environ.get("VLM_DEBUG"):
+        print(f"[VLM_DEBUG] Raw Gemini response:\n{raw}\n")
+
     return _parse_response(raw, phase)
 
 
@@ -107,6 +106,65 @@ def ask_operator_question(image_b64: str, question: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Stateful session for the autonomy loop
+# ---------------------------------------------------------------------------
+
+
+class VLMSession:
+    """Wraps analyze_frame() with cross-frame state tracking.
+
+    Tracks mission phase, cumulative room list, and threat history so the
+    skill loop doesn't have to manage VLM state itself.
+
+    Usage in a skill:
+
+        session = VLMSession()
+        while running:
+            result = session.update(self.image)
+            payload.update(result)
+            broadcast(payload)
+    """
+
+    def __init__(self):
+        self.phase: str = "recon"
+        self.rooms_seen: dict[str, dict] = {}   # type -> latest room data
+        self.threat_active: bool = False
+        self.frame_count: int = 0
+
+    def update(self, image_b64: str) -> dict:
+        """Analyze a frame using the current phase, update internal state.
+
+        Automatically switches to defusal phase when a threat is detected.
+        Returns the full dashboard-ready state dict.
+        """
+        result = analyze_frame(image_b64, phase=self.phase)
+        self.frame_count += 1
+
+        # Accumulate rooms across frames.
+        for room in result.get("rooms", []):
+            key = room.get("type", "Unknown")
+            self.rooms_seen[key] = room
+
+        # Auto-switch to defusal when threat detected.
+        if result.get("mission_phase") == "defuse" or result.get("defusal", {}).get("active"):
+            if not self.threat_active:
+                self.threat_active = True
+                self.phase = "defusal"
+
+        # Include cumulative rooms (all rooms seen so far, not just this frame).
+        result["rooms_cumulative"] = list(self.rooms_seen.values())
+
+        return result
+
+    def reset(self):
+        """Reset to recon mode (e.g. after threat is cleared)."""
+        self.phase = "recon"
+        self.threat_active = False
+        self.rooms_seen.clear()
+        self.frame_count = 0
+
+
+# ---------------------------------------------------------------------------
 # Gemini call
 # ---------------------------------------------------------------------------
 
@@ -116,19 +174,17 @@ def _call_gemini(system: str, user_text: str, image_b64: str) -> str:
     client = _get_client()
 
     image_bytes = base64.b64decode(image_b64)
-    image_part = {"mime_type": "image/jpeg", "data": image_bytes}
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+    text_part = types.Part.from_text(text=user_text)
 
-    response = client.generate_content(
-        [
-            {"role": "user", "parts": [image_part, {"text": user_text}]},
-        ],
-        generation_config=genai.GenerationConfig(
+    response = client.models.generate_content(
+        model=_MODEL,
+        contents=[image_part, text_part],
+        config=types.GenerateContentConfig(
+            system_instruction=system,
             temperature=0.2,
-            max_output_tokens=1024,
+            max_output_tokens=4096,
         ),
-        safety_settings={
-            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-        },
     )
 
     return response.text
@@ -143,7 +199,6 @@ def _parse_json(text: str) -> dict:
     """Extract JSON from Gemini's response, stripping markdown fences if present."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        # Strip ```json ... ``` fences.
         lines = cleaned.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         cleaned = "\n".join(lines)
@@ -159,9 +214,12 @@ def _parse_response(raw: str, phase: str) -> dict:
     try:
         data = _parse_json(raw)
     except (json.JSONDecodeError, ValueError):
-        # Unparseable response — return empty so the dashboard keeps running.
         if phase == "defusal":
             return {
+                "semantic_plan": _default_semantic_plan(
+                    "hold for operator review",
+                    "VLM response could not be parsed; wait for the next frame.",
+                ),
                 "defusal": {
                     "active": True,
                     "device_description": "VLM parse error — waiting for next frame",
@@ -170,11 +228,68 @@ def _parse_response(raw: str, phase: str) -> dict:
                     "confidence": "low",
                 }
             }
-        return {"rooms": []}
+        return {
+            "rooms": [],
+            "annotations": [],
+            "semantic_plan": _default_semantic_plan(
+                "continue scanning",
+                "VLM response could not be parsed; wait for the next frame.",
+            ),
+        }
 
     if phase == "recon":
         return _format_recon(data)
     return _format_defusal(data)
+
+
+def _normalize_annotations(raw_annotations: list) -> list:
+    """Validate and normalize bounding box annotations from Gemini."""
+    out = []
+    for a in raw_annotations:
+        bbox = a.get("bbox", [])
+        if len(bbox) != 4:
+            continue
+        bbox = [max(0, min(1000, int(v))) for v in bbox]
+        out.append({
+            "label": a.get("label", "unknown"),
+            "bbox": bbox,
+            "category": a.get("category", "object"),
+        })
+    return out
+
+
+def _default_semantic_plan(next_action: str, rationale: str) -> dict:
+    return {
+        "next_action": next_action,
+        "rationale": rationale,
+        "confidence": "low",
+    }
+
+
+def _normalize_semantic_plan(
+    raw_plan: object,
+    fallback_action: str,
+    fallback_rationale: str,
+) -> dict:
+    """Normalize Gemini's high-level advisory plan.
+
+    The result is intentionally semantic only; robot-control loops must treat
+    this as display/planner context, not as a velocity or motion command.
+    """
+    if not isinstance(raw_plan, dict):
+        return _default_semantic_plan(fallback_action, fallback_rationale)
+
+    next_action = str(raw_plan.get("next_action") or fallback_action).strip()
+    rationale = str(raw_plan.get("rationale") or fallback_rationale).strip()
+    confidence = str(raw_plan.get("confidence") or "low").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "low"
+
+    return {
+        "next_action": next_action or fallback_action,
+        "rationale": rationale or fallback_rationale,
+        "confidence": confidence,
+    }
 
 
 def _format_recon(data: dict) -> dict:
@@ -188,9 +303,16 @@ def _format_recon(data: dict) -> dict:
             "threats": r.get("threats", []),
         })
 
-    result: dict = {"rooms": rooms}
+    result: dict = {
+        "rooms": rooms,
+        "annotations": _normalize_annotations(data.get("annotations", [])),
+        "semantic_plan": _normalize_semantic_plan(
+            data.get("semantic_plan"),
+            "continue scanning",
+            "No high-level VLM plan was returned for this frame.",
+        ),
+    }
 
-    # If a threat was detected, auto-activate defusal mode.
     if data.get("threat_detected", False):
         threat_descriptions = []
         for r in rooms:
@@ -218,6 +340,12 @@ def _format_defusal(data: dict) -> dict:
         })
 
     return {
+        "annotations": _normalize_annotations(data.get("annotations", [])),
+        "semantic_plan": _normalize_semantic_plan(
+            data.get("semantic_plan"),
+            "hold for operator review",
+            "No high-level VLM plan was returned for this defusal frame.",
+        ),
         "defusal": {
             "active": True,
             "device_description": data.get("device_description", ""),

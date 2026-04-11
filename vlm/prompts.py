@@ -10,23 +10,22 @@ _JSON_PREAMBLE = (
     "Respond ONLY with valid JSON — no markdown fences, no commentary."
 )
 
+_BBOX_RULE = (
+    "For every notable entity you detect (people, suspicious items, doors, "
+    "furniture, threats), include a bounding box. Use the format "
+    "[y_min, x_min, y_max, x_max] where each value is an integer 0–1000, "
+    "normalized to the image dimensions (0 = top/left edge, 1000 = bottom/right edge)."
+)
+
+_SEMANTIC_PLAN_RULE = (
+    "The semantic_plan is advisory high-level planning only. It must describe "
+    "what an operator or separate planner should consider next; it must NOT be "
+    "a direct motor command, velocity command, or low-level motion-control instruction."
+)
+
 
 def recon_prompt() -> tuple[str, str]:
-    """Room scanning during the recon phase.
-
-    Expected output shape (list of rooms visible in the frame):
-    {
-      "rooms": [
-        {
-          "type":    str,          # e.g. "Kitchen", "Hallway", "Office"
-          "people":  int,          # count of visible people
-          "objects": [str, ...],   # notable objects
-          "threats": [str, ...]    # empty list if none visible
-        }
-      ],
-      "threat_detected": bool      # true → caller should switch to defusal
-    }
-    """
+    """Room scanning during the recon phase."""
     system = _JSON_PREAMBLE
     user = (
         "Analyze this camera frame from a bomb-disposal robot scouting a building.\n"
@@ -41,7 +40,19 @@ def recon_prompt() -> tuple[str, str]:
         '      "threats": ["<description of any suspicious item>", ...]\n'
         "    }\n"
         "  ],\n"
-        '  "threat_detected": <bool, true if ANY item looks like an explosive device>\n'
+        '  "annotations": [\n'
+        "    {\n"
+        '      "label": "<what it is, e.g. person, desk, suspicious backpack>",\n'
+        '      "bbox": [y_min, x_min, y_max, x_max],\n'
+        '      "category": "<person | threat | object>"\n'
+        "    }\n"
+        "  ],\n"
+        '  "threat_detected": <bool, true if ANY item looks like an explosive device>,\n'
+        '  "semantic_plan": {\n'
+        '    "next_action": "<high-level advisory action, e.g. continue scan, inspect object, hold for operator>",\n'
+        '    "rationale": "<short explanation grounded in the visible frame>",\n'
+        '    "confidence": "<high | medium | low>"\n'
+        "  }\n"
         "}\n"
         "\n"
         "Rules:\n"
@@ -50,28 +61,17 @@ def recon_prompt() -> tuple[str, str]:
         "packages with wires, pipe-like objects with attached electronics, etc.\n"
         "- If nothing suspicious is visible, threats should be an empty list and "
         "threat_detected should be false.\n"
-        "- People count should only include clearly visible humans."
+        "- People count should only include clearly visible humans.\n"
+        f"- {_BBOX_RULE}\n"
+        "- Every person and threat MUST have an annotation with a bounding box.\n"
+        "- Include annotations for important objects like doors, desks, and windows too.\n"
+        f"- {_SEMANTIC_PLAN_RULE}"
     )
     return system, user
 
 
 def defusal_prompt() -> tuple[str, str]:
-    """Wire-level analysis when a threat device is in view (arm camera).
-
-    Expected output shape:
-    {
-      "device_description": str,
-      "wires": [
-        {
-          "color":      str,
-          "connection": str,    # e.g. "timer", "battery", "detonator", "unknown"
-          "risk":       str     # "high" | "medium" | "low"
-        }
-      ],
-      "recommendation": str,   # e.g. "Cut the blue wire"
-      "confidence":     str    # "high" | "medium" | "low"
-    }
-    """
+    """Wire-level analysis when a threat device is in view (arm camera)."""
     system = _JSON_PREAMBLE
     user = (
         "You are looking at a suspected explosive device through the robot's arm camera.\n"
@@ -86,15 +86,31 @@ def defusal_prompt() -> tuple[str, str]:
         '      "risk": "<high | medium | low>"\n'
         "    }\n"
         "  ],\n"
+        '  "annotations": [\n'
+        "    {\n"
+        '      "label": "<what it is, e.g. red wire, timer, battery>",\n'
+        '      "bbox": [y_min, x_min, y_max, x_max],\n'
+        '      "category": "<wire | device | component>"\n'
+        "    }\n"
+        "  ],\n"
         '  "recommendation": "<which wire to cut and why>",\n'
-        '  "confidence": "<high | medium | low>"\n'
+        '  "confidence": "<high | medium | low>",\n'
+        '  "semantic_plan": {\n'
+        '    "next_action": "<high-level advisory action, e.g. improve view, hold for operator, inspect connection>",\n'
+        '    "rationale": "<short explanation grounded in the visible wiring>",\n'
+        '    "confidence": "<high | medium | low>"\n'
+        "  }\n"
         "}\n"
         "\n"
         "Rules:\n"
         "- List every visible wire with its color and where it appears to connect.\n"
         "- Risk is based on how likely cutting that wire would trigger detonation.\n"
         "- Recommendation should be the safest action based on visible connections.\n"
-        "- If you cannot clearly see the wiring, set confidence to low."
+        "- If you cannot clearly see the wiring, set confidence to low.\n"
+        f"- {_BBOX_RULE}\n"
+        "- Every wire, the device body, and any visible components (timer, battery, "
+        "detonator) MUST have an annotation with a bounding box.\n"
+        f"- {_SEMANTIC_PLAN_RULE}"
     )
     return system, user
 
