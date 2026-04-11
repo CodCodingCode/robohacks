@@ -13,8 +13,9 @@
  *   camera_topic=/mars/…  with default MJPEG only (default main left raw)
  *
  * On http(s)://host:8080/ with no mjpeg=, the main panel defaults to
- * {proto}//host:camera_port/stream?topic=camera_topic so one URL opens map + WS + video
- * when web_video_server runs on that port (e.g. 8090).
+ * {proto}//host:camera_port/stream?topic=camera_topic (camera_port default 8090)
+ * so one *browser* URL on 8080 loads map + WS + video while web_video_server
+ * listens on 8090 (avoids colliding with this server on 8080).
  *
  *   allow_local_mission=1 when feed=ws, allow footer mode buttons to override display only
  */
