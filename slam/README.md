@@ -1,5 +1,29 @@
 # slam/ — live SLAM → dashboard bridge
 
+## ROS node (recommended): `map_stream_node.py`
+
+**Plain ROS 2 node** — subscribes to **`/map`**, **`/pose`**, **`/odom`**, **`/mapping_pose`**, **`/battery_state`**, **`/scan`**, and serves:
+
+- **HTTP** — static files from `../dashboard/` (so you open `http://<robot>:8080/`)
+- **WebSocket** — JSON at **`/ws`** for the same dashboard (`feed=same` is auto-selected on ports 8080 / 8000 / 8001)
+
+Run **on the Jetson** after `source /opt/ros/humble/setup.bash` and your workspace overlay:
+
+```bash
+cd ~/robohacks   # or wherever this repo lives
+pip install -r slam/requirements.txt   # websockets
+python3 slam/map_stream_node.py --host 0.0.0.0 --port 8080
+```
+
+On your laptop, browse **`http://<robot-ip>:8080/`** (or SSH tunnel that port).  
+For local dev with `python3 -m http.server` on port **8766**, add **`?feed=mock`** or **`?feed=ws&ws=ws://ROBOT:8080/ws`**.
+
+Why not only the Skill below? The Innate skills executor can **starve ROS subscriptions** during a long `execute()`. This node uses its own `rclpy.spin` thread so **`/map` and `/odom` always update**.
+
+---
+
+## Innate Skill (alternative): `MapStreamSkill`
+
 A standalone Innate `Skill` that reads the robot's built-in SLAM output
 (`RobotStateType.LAST_MAP` + `LAST_ODOM`, auto-updated at 50 Hz by the
 brain_client) and streams it as JSON over a WebSocket at
@@ -35,13 +59,20 @@ at it.
   to change; the dashboard's `Object.assign` shallow-merge means pose
   updates don't clobber the cached map between map pushes).
 
+## Run `ros2` on the robot, not on your Mac
+
+If you see `zsh: command not found: ros2` on a Mac, that is normal: install
+ROS on the robot and **SSH in first**, then run the commands below. For a
+full laptop-side checklist (SSH, ports, MJPEG, dashboard URL), see
+[../dashboard/LIVE.md](../dashboard/LIVE.md).
+
 ## Prerequisites
 
 1. **Put the robot in `mapping` mode** (one-time, before starting the
-   skill). Otherwise `LAST_MAP` will be stale / empty.
+   skill). Otherwise `LAST_MAP` will be stale / empty. **Execute on the
+   Jetson** (after `ssh jetson1@<ROBOT-IP>` and `source …/setup.bash`):
 
    ```bash
-   ssh jetson1@<ROBOT-IP>
    ros2 service call /change_navigation_mode \
        brain_messages/srv/ChangeNavigationMode "{mode: mapping}"
    ```

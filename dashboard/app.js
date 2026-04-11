@@ -3,24 +3,56 @@
  * MJPEG camera URLs, per-panel staleness, read-only operator surface.
  *
  * Query params:
- *   feed=mock|ws          default mock
- *   ws=wss://host/path    WebSocket JSON (partial updates OK)
+ *   feed=mock|same|ws     default: mock (or "same" on :8080/:8000/:8001)
+ *   feed=same             ws://this-host/ws (map_stream_node serves page + WS)
+ *   feed=ws&ws=URL        explicit WebSocket JSON (partial updates OK)
  *   mjpeg=URL             main RGB camera (MJPEG or snapshot URL)
  *   gripper_mjpeg=URL     gripper / tool cam (optional)
+ *   nocamera=1            on :8080, skip default MJPEG (see below)
+ *   camera_port=8090      with default MJPEG only (default 8090)
+ *   camera_topic=/mars/…  with default MJPEG only (default main left raw)
+ *
+ * On http(s)://host:8080/ with no mjpeg=, the main panel defaults to
+ * {proto}//host:camera_port/stream?topic=camera_topic so one URL opens map + WS + video
+ * when web_video_server runs on that port (e.g. 8090).
+ *
  *   allow_local_mission=1 when feed=ws, allow footer mode buttons to override display only
  */
 
 (function () {
   const params = new URLSearchParams(window.location.search);
-  const feedMode = (params.get("feed") || "mock").toLowerCase();
-  const wsUrl = params.get("ws") || "";
-  const mjpegMain = params.get("mjpeg") || "";
-  const mjpegGripper = params.get("gripper_mjpeg") || params.get("gripper") || "";
+  const port = location.port || "";
+  const inferSameOrigin =
+    port === "8080" || port === "8000" || port === "8001";
+  const feedMode = (
+    params.get("feed") || (inferSameOrigin ? "same" : "mock")
+  ).toLowerCase();
+  const wsExplicit = (params.get("ws") || "").trim();
+  let mjpegMain = (params.get("mjpeg") || "").trim();
+  const mjpegGripper =
+    (params.get("gripper_mjpeg") || params.get("gripper") || "").trim();
+  const nocamera = params.get("nocamera") === "1";
+  const mapStreamPort8080 = port === "8080";
+  if (!nocamera && !mjpegMain && mapStreamPort8080) {
+    const camPort = (params.get("camera_port") || "8090").trim() || "8090";
+    const camTopic = (
+      params.get("camera_topic") || "/mars/main_camera/left/image_raw"
+    ).trim();
+    const camProto = location.protocol === "https:" ? "https:" : "http:";
+    mjpegMain = `${camProto}//${location.hostname}:${camPort}/stream?topic=${camTopic}`;
+  }
   const allowLocalMission = params.get("allow_local_mission") === "1";
 
-  const liveWs = feedMode === "ws" && !!wsUrl;
-  if (feedMode === "ws" && !wsUrl) {
-    console.warn("RECON dashboard: feed=ws but no ws= URL — falling back to mock.");
+  let wsConnectUrl = "";
+  if (feedMode === "same") {
+    wsConnectUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+  } else if (feedMode === "ws") {
+    wsConnectUrl = wsExplicit;
+  }
+
+  const liveWs = feedMode !== "mock" && !!wsConnectUrl;
+  if (feedMode === "ws" && !wsExplicit) {
+    console.warn("RECON dashboard: feed=ws but no ws= URL — use mock or feed=same.");
   }
 
   const state = ReconAdapter.initialState();
@@ -149,10 +181,16 @@
       connectionChip.textContent = "Defusal";
       connectionChip.className = "chip chip-red";
     } else if (liveWs) {
-      if (connectionChip.textContent !== "Reconnecting") {
+      if (
+        connectionChip.textContent !== "Reconnecting" &&
+        connectionChip.textContent !== "Connecting"
+      ) {
         connectionChip.textContent = "Live";
         connectionChip.className = "chip chip-green";
       }
+    } else {
+      connectionChip.textContent = "Mock";
+      connectionChip.className = "chip chip-amber";
     }
   }
 
@@ -264,21 +302,24 @@
   let feed = null;
   let stopWs = null;
 
-  // Live feed from robohacks/slam/map_stream_node.py on the robot.
-  // Same-origin: the map_stream_node serves BOTH the static dashboard and
-  // the /ws endpoint on the same port, so a single SSH tunnel to the http
-  // port covers everything. Query params feed=/ws= are ignored on purpose
-  // — chud-branch always talks to the node that served the page.
-  stopWs = connectWebSocket(
-    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
-    applyUpstreamMessage,
-  );
+  // feed=same → ws://this-host/ws (map_stream_node serves HTML + /ws on one port).
+  // feed=ws&ws=… → explicit bridge URL (e.g. laptop http.server → robot).
+  // feed=mock or default on :8766 etc. → ReconMock.
+  if (liveWs) {
+    stopWs = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
+    connectionChip.textContent = "Connecting";
+    connectionChip.className = "chip chip-amber";
+  } else {
+    feed = ReconMock.createMockFeed(applyUpstreamMessage);
+    connectionChip.textContent = "Mock";
+    connectionChip.className = "chip chip-amber";
+  }
 
   window.ReconDashboard = {
     getState: () => state,
     getConfig: () => ({
       feedMode,
-      wsUrl,
+      wsConnectUrl,
       mjpegMain,
       mjpegGripper,
       liveWs,
@@ -297,8 +338,8 @@
 
   console.log(
     "RECON BOT dashboard ·",
-    liveWs ? `WS ${wsUrl}` : "mock feed",
-    mjpegMain ? `· mjpeg` : "",
-    "| params: feed, ws, mjpeg, gripper_mjpeg, allow_local_mission",
+    liveWs ? `WS ${wsConnectUrl}` : "mock feed",
+    mjpegMain ? " · mjpeg" : "",
+    " | params: feed, ws, mjpeg, gripper_mjpeg, nocamera, camera_port, camera_topic, allow_local_mission",
   );
 })();
