@@ -264,15 +264,15 @@
   let feed = null;
   let stopWs = null;
 
-  if (liveWs) {
-    stopWs = connectWebSocket(wsUrl, applyUpstreamMessage);
-    connectionChip.textContent = "Connecting";
-    connectionChip.className = "chip chip-amber";
-  } else {
-    feed = ReconMock.createMockFeed(applyUpstreamMessage);
-    connectionChip.textContent = "Mock";
-    connectionChip.className = "chip chip-amber";
-  }
+  // Live feed from robohacks/slam/map_stream_node.py on the robot.
+  // Same-origin: the map_stream_node serves BOTH the static dashboard and
+  // the /ws endpoint on the same port, so a single SSH tunnel to the http
+  // port covers everything. Query params feed=/ws= are ignored on purpose
+  // — chud-branch always talks to the node that served the page.
+  stopWs = connectWebSocket(
+    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+    applyUpstreamMessage,
+  );
 
   window.ReconDashboard = {
     getState: () => state,
