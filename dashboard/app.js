@@ -184,13 +184,15 @@
 
   // ---- Boot -------------------------------------------------------------
 
-  // TONIGHT: mock feed.
-  feed = ReconMock.createMockFeed(applyState);
-  connectionChip.textContent = "MOCK FEED";
-  connectionChip.className = "chip chip-amber";
-
-  // TOMORROW (swap one line):
-  //   connectWebSocket("ws://localhost:8000/ws", applyState);
+  // Live feed from robohacks/slam/map_stream_node.py on the robot.
+  // Fallback to mock: feed = ReconMock.createMockFeed(applyState);
+  // Same-origin: the map_stream_node serves BOTH the static dashboard and
+  // the /ws endpoint on the same port, so a single SSH tunnel to the http
+  // port covers everything.
+  connectWebSocket(
+    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+    applyState,
+  );
   //
   // To demo the reconnect stub against a non-existent server:
   //   connectWebSocket("ws://localhost:9999/ws", applyState);

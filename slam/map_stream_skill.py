@@ -44,10 +44,13 @@ the Innate SLAM publishes in.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import threading
 import time
+
+import numpy as np
 
 from brain_client.skill_types import (
     Skill,
@@ -71,7 +74,7 @@ POSE_HZ = 10.0
 MAP_HZ = 1.0
 
 WS_HOST = "0.0.0.0"
-WS_PORT = 8000
+WS_PORT = 8001
 
 
 class MapStreamSkill(Skill):
@@ -194,41 +197,53 @@ class MapStreamSkill(Skill):
                 payload: dict = {
                     "timestamp": time.time(),
                     "mission_phase": "recon",
+                    "_debug": {
+                        "odom_type": type(self.odom).__name__,
+                        "map_type": type(self.map_data).__name__,
+                    },
                 }
 
                 # --- pose (every tick) -------------------------------------
-                if self.odom is not None:
-                    p = self.odom.pose.pose.position
-                    q = self.odom.pose.pose.orientation
-                    payload["robot"] = {
-                        "x": p.x,
-                        "y": p.y,
-                        "theta": _yaw_from_quat(q.x, q.y, q.z, q.w),
-                        # No battery RobotStateType documented — hard-code
-                        # until one is exposed. The dashboard just renders
-                        # this as a status-bar percentage.
-                        "battery": 100,
-                    }
+                # The skills_action_server injects LAST_ODOM as a dict (not
+                # an Odometry message). See skills_action_server.py ~l.786.
+                odom = self.odom
+                if isinstance(odom, dict):
+                    try:
+                        p = odom["pose"]["pose"]["position"]
+                        q = odom["pose"]["pose"]["orientation"]
+                        payload["robot"] = {
+                            "x": p["x"],
+                            "y": p["y"],
+                            "theta": _yaw_from_quat(q["x"], q["y"], q["z"], q["w"]),
+                            "battery": 100,
+                        }
+                    except (KeyError, TypeError):
+                        pass
 
                 # --- map (every ~1s, shallow-merge won't clobber pose) -----
+                # LAST_MAP is injected as a dict with `data_b64` (base64 int8).
                 now = time.time()
-                if self.map_data is not None and (now - last_map_push) >= map_interval:
-                    info = self.map_data.info
-                    payload["slam"] = {
-                        "map": {
-                            "width": info.width,
-                            "height": info.height,
-                            "resolution": info.resolution,
-                            "origin": {
-                                "x": info.origin.position.x,
-                                "y": info.origin.position.y,
-                            },
-                            # list() handles numpy arrays, bytes, or
-                            # already-a-list without special-casing.
-                            "data": list(self.map_data.data),
+                map_data = self.map_data
+                if isinstance(map_data, dict) and (now - last_map_push) >= map_interval:
+                    try:
+                        info = map_data["info"]
+                        raw = base64.b64decode(map_data["data_b64"])
+                        arr = np.frombuffer(raw, dtype=np.int8)
+                        payload["slam"] = {
+                            "map": {
+                                "width": info["width"],
+                                "height": info["height"],
+                                "resolution": info["resolution"],
+                                "origin": {
+                                    "x": info["origin"]["position"]["x"],
+                                    "y": info["origin"]["position"]["y"],
+                                },
+                                "data": arr.tolist(),
+                            }
                         }
-                    }
-                    last_map_push = now
+                        last_map_push = now
+                    except (KeyError, TypeError, ValueError) as exc:
+                        self._send_feedback(f"map decode error: {exc}")
 
                 broadcast(payload)
 
