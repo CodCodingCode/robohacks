@@ -4,6 +4,8 @@
 
 **Bridge (ROS → dashboard):** on the Jetson, after sourcing ROS + your workspace, run `python3 slam/map_stream_node.py --host 0.0.0.0 --port 8080` from this repo, then open **`http://<ROBOT_IP>:8080/`** in a browser (same host serves the page and **`/ws`**). For a static server on your laptop, use **`?feed=ws&ws=ws://<ROBOT_IP>:8080/ws`**.
 
+**Ports:** map + dashboard + WebSocket = **8080** (one process). Camera MJPEG = **second** port (**8090** by default in `app.js`) so it does not collide with `map_stream_node`. You still use **one browser URL** (`http://<ROBOT_IP>:8080/`); the page pulls video from 8090 automatically. Start both with **`./slam/run_live_dashboard.sh`** after `chmod +x slam/run_live_dashboard.sh`.
+
 ## 1. SSH into the robot
 
 ```bash
@@ -134,19 +136,22 @@ On the robot, a common approach is **`web_video_server`** (if installed):
 ```bash
 sudo apt install ros-humble-web-video-server
 source /opt/ros/humble/setup.bash
-ros2 run web_video_server web_video_server
+# Port 8090 avoids clashing with map_stream_node on 8080.
+ros2 run web_video_server web_video_server --ros-args -p port:=8090
 ```
 
-Then try (topic names vary; Innate often has `/oak/rgb/image_raw` or `/mars/main_camera/image`):
+Topic names vary; Innate often has `/oak/rgb/image_raw` or `/mars/main_camera/image`. If the dashboard is served **from the robot** (`map_stream_node` on 8080), open **`http://<ROBOT_IP>:8080/`** — no `mjpeg=` query is required (defaults target port **8090**).
+
+From your **laptop** static server, include the camera port **8090**:
 
 ```text
-http://localhost:8766/?feed=ws&ws=ws://ROBOT_IP:8000/ws&mjpeg=http://ROBOT_IP:8080/stream?topic=/oak/rgb/image_raw
+http://localhost:8766/?feed=ws&ws=ws://ROBOT_IP:8080/ws&mjpeg=http://ROBOT_IP:8090/stream?topic=/oak/rgb/image_raw
 ```
 
 Exact `mjpeg=` URL depends on `web_video_server` version — check its web UI or docs. Gripper cam, if exposed the same way:
 
 ```text
-&gripper_mjpeg=http://ROBOT_IP:8080/stream?topic=/mars/arm/image_raw
+&gripper_mjpeg=http://ROBOT_IP:8090/stream?topic=/mars/arm/image_raw
 ```
 
 ## 6. “All info” (intel, radar, telemetry)
@@ -155,4 +160,4 @@ Exact `mjpeg=` URL depends on `web_video_server` version — check its web UI or
 
 ---
 
-**Checklist:** `ros2` only on robot → mapping mode → `websockets` → skill running → `websocat` OK → Mac `http.server` → `?feed=ws&ws=ws://ROBOT_IP:8000/ws` → optional `mjpeg=` + skill extensions for extra fields.
+**Checklist:** `ros2` only on robot → mapping mode → `websockets` → **`./slam/run_live_dashboard.sh`** (or `map_stream_node` alone) → open **`http://ROBOT_IP:8080/`** → optional Mac `http.server` + `?feed=ws&ws=ws://ROBOT_IP:8080/ws` → MapStreamSkill path uses port **8000** instead (see §3).

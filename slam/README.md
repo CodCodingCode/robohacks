@@ -13,6 +13,7 @@ Run **on the Jetson** after `source /opt/ros/humble/setup.bash` and your workspa
 cd ~/robohacks   # or wherever this repo lives
 pip install -r slam/requirements.txt   # websockets
 python3 slam/map_stream_node.py --host 0.0.0.0 --port 8080
+# Or map + camera together: chmod +x slam/run_live_dashboard.sh && ./slam/run_live_dashboard.sh
 ```
 
 On your laptop, browse **`http://<robot-ip>:8080/`** (or SSH tunnel that port).  
