@@ -62,8 +62,11 @@
       viewport.centerWY += (state.robot.y - viewport.centerWY) * 0.08;
     }
 
-    // Background wipe (the CSS gradient shows through via globalCompositeOperation? No — canvas needs explicit clear).
     ctx.clearRect(0, 0, cssW, cssH);
+    ctx.save();
+    ctx.fillStyle = "#fafafa";
+    ctx.fillRect(0, 0, cssW, cssH);
+    ctx.restore();
     drawGrid();
 
     if (state.slam) {
@@ -75,7 +78,9 @@
     }
 
     drawRoomLabels(state.rooms || []);
-    drawRadarBlips(state.radar_targets || []);
+    drawRadarBlips(
+      state.radar_targets_display || state.radar_targets || [],
+    );
 
     if (state.robot) {
       drawRobot(state.robot);
@@ -91,7 +96,7 @@
     if (stepPx < 6) return;
 
     ctx.save();
-    ctx.strokeStyle = "rgba(60, 70, 100, 0.25)";
+    ctx.strokeStyle = "rgba(98, 0, 238, 0.06)";
     ctx.lineWidth = 1;
     ctx.beginPath();
 
@@ -145,9 +150,9 @@
         const cell = mapData.data[cy * mapData.width + cx];
         if (cell === -1) continue; // unknown: leave background showing
         if (cell >= 50) {
-          ctx.fillStyle = "#cccccc";
+          ctx.fillStyle = "#e0e0e0";
         } else {
-          ctx.fillStyle = "#16162a";
+          ctx.fillStyle = "#ffffff";
         }
         const wx = ox + cx * res;
         const wy = oy + cy * res;
@@ -163,7 +168,7 @@
   function drawLidarScan(scan, robotPose) {
     if (!scan || !scan.ranges) return;
     ctx.save();
-    ctx.fillStyle = "#445566";
+    ctx.fillStyle = "#9e9e9e";
     for (let i = 0; i < scan.ranges.length; i++) {
       const r = scan.ranges[i];
       if (!isFinite(r) || r <= 0 || r >= scan.range_max) continue;
@@ -184,43 +189,34 @@
       const sx = toScreenX(target.x);
       const sy = toScreenY(target.y);
       const confirmed = !!target.confirmed_by_vlm;
-      const color = confirmed ? "#00ff88" : "#ffaa00";
+      const color = confirmed ? "#018786" : "#6200ee";
 
-      // Confidence ring (large, faint).
       ctx.save();
-      ctx.globalAlpha = Math.max(0.15, target.confidence || 0.5);
+      ctx.globalAlpha = Math.max(0.2, (target.confidence || 0.5) * 0.55);
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.25;
       ctx.beginPath();
       ctx.arc(sx, sy, 22, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
-      // Pulsing core.
-      const pulse = 8 + Math.sin(t / 200 + target.id) * 3;
+      const pulse = 7 + Math.sin(t / 280 + target.id) * 2;
       ctx.save();
       ctx.fillStyle = color;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 12;
+      ctx.globalAlpha = confirmed ? 0.9 : 0.65;
       ctx.beginPath();
       ctx.arc(sx, sy, pulse, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
-      // Label.
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "11px ui-monospace, monospace";
+      ctx.fillStyle = "rgba(0,0,0,0.75)";
+      ctx.font = "500 11px Roboto, system-ui, sans-serif";
       ctx.textAlign = "left";
       ctx.fillText(
         `ID:${target.id}  ${Math.round((target.confidence || 0) * 100)}%`,
         sx + 16,
         sy - 14,
       );
-      if (target.note) {
-        ctx.fillStyle = "#ffaa00";
-        ctx.font = "9px ui-monospace, monospace";
-        ctx.fillText(target.note, sx + 16, sy - 2);
-      }
     }
   }
 
@@ -233,36 +229,33 @@
       const hasThreat = (room.threats || []).length > 0;
 
       ctx.fillStyle = hasThreat
-        ? "rgba(255, 0, 0, 0.2)"
-        : "rgba(0, 255, 136, 0.2)";
+        ? "rgba(176, 0, 32, 0.08)"
+        : "rgba(3, 218, 198, 0.1)";
       ctx.fillRect(sx - 50, sy - 16, 100, 32);
 
-      ctx.strokeStyle = hasThreat ? "#ff4444" : "#00ff88";
+      ctx.strokeStyle = hasThreat ? "#b00020" : "#018786";
       ctx.lineWidth = 1;
       ctx.strokeRect(sx - 50, sy - 16, 100, 32);
 
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 12px ui-monospace, monospace";
+      ctx.fillStyle = "#000000";
+      ctx.font = "500 12px Roboto, system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText(String(room.type || "").toUpperCase(), sx, sy + 1);
 
       if (room.people && room.people > 0) {
-        ctx.fillStyle = "#ffaa00";
-        ctx.font = "10px ui-monospace, monospace";
-        ctx.fillText(`PEOPLE: ${room.people}`, sx, sy + 13);
+        ctx.fillStyle = "#6200ee";
+        ctx.font = "500 10px Roboto, system-ui, sans-serif";
+        ctx.fillText(`${room.people} people`, sx, sy + 13);
       }
 
-      // Threat markers (rendered on top later so they're visible above blips).
       for (const threat of room.threats || []) {
         const tx = toScreenX(threat.x);
         const ty = toScreenY(threat.y);
         ctx.save();
-        ctx.fillStyle = "#ff4444";
-        ctx.shadowColor = "#ff4444";
-        ctx.shadowBlur = 14;
-        ctx.font = "22px serif";
+        ctx.fillStyle = "#b00020";
+        ctx.font = "18px sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText("⚠", tx, ty + 8);
+        ctx.fillText("!", tx, ty + 6);
         ctx.restore();
       }
     }
@@ -284,7 +277,7 @@
     if (trail.length < 2) return;
 
     ctx.save();
-    ctx.strokeStyle = "rgba(0, 170, 255, 0.35)";
+    ctx.strokeStyle = "rgba(98, 0, 238, 0.22)";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(toScreenX(trail[0].x), toScreenY(trail[0].y));
@@ -304,17 +297,14 @@
     ctx.rotate(-pose.theta);
 
     // Heading wedge.
-    ctx.fillStyle = "rgba(0, 170, 255, 0.15)";
+    ctx.fillStyle = "rgba(98, 0, 238, 0.12)";
     ctx.beginPath();
     ctx.moveTo(0, 0);
     ctx.arc(0, 0, 60, -0.4, 0.4);
     ctx.closePath();
     ctx.fill();
 
-    // Robot triangle.
-    ctx.fillStyle = "#00aaff";
-    ctx.shadowColor = "#00aaff";
-    ctx.shadowBlur = 10;
+    ctx.fillStyle = "#6200ee";
     ctx.beginPath();
     ctx.moveTo(12, 0);
     ctx.lineTo(-8, -8);

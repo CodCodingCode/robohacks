@@ -234,6 +234,14 @@
         action_log: actionLog.slice(),
       };
 
+      const telemetry = [
+        { label: "PM2.5", value: `${(12 + Math.sin(elapsed) * 4).toFixed(0)} µg/m³` },
+        { label: "VOC index", value: String(110 + Math.floor(Math.sin(elapsed * 0.7) * 20)) },
+        { label: "NFC", value: elapsed > 3 ? "No tag" : "—" },
+        { label: "UART sensor hub", value: `OK · ${(elapsed % 99).toFixed(0)}` },
+        { label: "LD2450 mesh", value: "5 sensors · fused" },
+      ];
+
       const state = {
         timestamp: Math.floor(Date.now() / 1000),
         mission_phase: phase,
@@ -248,6 +256,7 @@
         },
         radar_targets,
         rooms,
+        telemetry,
         defusal,
       };
 
