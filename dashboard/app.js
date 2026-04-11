@@ -152,6 +152,7 @@
     ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     renderSemanticPlan(state.semantic_plan);
+    ReconIntel.logPlanUpdate(intelEl, state.semantic_plan);
     updateStatusBar(state);
     updateStalenessDom();
   }
