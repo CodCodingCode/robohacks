@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RECON BOT — Command Center</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="header-bar">
+      <div class="brand">
+        <span class="brand-mark">▲</span>
+        <span class="brand-title">RECON BOT</span>
+        <span class="brand-sub">Command Center</span>
+      </div>
+      <div class="status-cluster">
+        <span id="connection-chip" class="chip chip-amber">INITIALIZING</span>
+        <span id="clock" class="chip chip-muted">--:--:--</span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel-map">
+        <div class="panel-header">
+          <span class="panel-title">TACTICAL MAP</span>
+          <span class="panel-meta" id="map-meta">SLAM · RADAR · VLM</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="tactical-map"></canvas>
+          <div class="legend">
+            <span><i class="dot dot-cyan"></i>Robot</span>
+            <span><i class="dot dot-green"></i>Confirmed</span>
+            <span><i class="dot dot-amber"></i>Radar only</span>
+            <span><i class="dot dot-red"></i>Threat</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="right-column" class="right-column">
+        <div class="panel panel-camera">
+          <div class="panel-header">
+            <span class="panel-title">CAMERA FEED</span>
+            <span class="panel-meta" id="camera-meta">MAIN · 2 FPS</span>
+          </div>
+          <div class="camera-wrap">
+            <img id="camera-feed" alt="camera feed" />
+            <div class="scanlines"></div>
+            <div class="camera-placeholder">NO SIGNAL</div>
+          </div>
+        </div>
+
+        <div class="panel panel-intel">
+          <div class="panel-header">
+            <span class="panel-title">AI INTEL FEED</span>
+            <span class="panel-meta">VLM</span>
+          </div>
+          <div id="intel-feed" class="intel-list"></div>
+        </div>
+      </section>
+
+      <section id="defusal-panel" class="defusal-panel" hidden>
+        <div class="panel panel-gripper">
+          <div class="panel-header">
+            <span class="panel-title">⚠ GRIPPER CAM</span>
+            <span class="panel-meta" id="defusal-status">ANALYZING</span>
+          </div>
+          <div class="camera-wrap">
+            <img id="gripper-feed" alt="gripper camera" />
+            <div class="scanlines"></div>
+            <div class="crosshair"></div>
+          </div>
+        </div>
+
+        <div class="panel panel-threat">
+          <div class="panel-header">
+            <span class="panel-title">THREAT ANALYSIS</span>
+            <span class="panel-meta" id="defusal-confidence">--</span>
+          </div>
+          <div class="threat-body">
+            <div class="threat-device">
+              <span class="label">DEVICE</span>
+              <span id="defusal-device">—</span>
+            </div>
+            <div class="wire-list" id="defusal-wires"></div>
+            <div class="threat-recommendation">
+              <span class="label">RECOMMENDATION</span>
+              <span id="defusal-recommendation">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel panel-log">
+          <div class="panel-header">
+            <span class="panel-title">ACTION LOG</span>
+          </div>
+          <ul id="defusal-log" class="action-log"></ul>
+        </div>
+
+        <div class="panel panel-controls">
+          <div class="panel-header">
+            <span class="panel-title">OPERATOR CONTROLS</span>
+          </div>
+          <div class="control-grid">
+            <button class="btn btn-red" data-defusal-action="CUT_RED">
+              CUT RED
+            </button>
+            <button class="btn btn-blue" data-defusal-action="CUT_BLUE">
+              CUT BLUE
+            </button>
+            <button class="btn btn-green" data-defusal-action="CUT_GREEN">
+              CUT GREEN
+            </button>
+            <button class="btn btn-amber" data-defusal-action="FLIP_SWITCH">
+              FLIP SWITCH
+            </button>
+            <button class="btn btn-abort" data-defusal-action="ABORT">
+              ABORT
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer-bar">
+      <div class="footer-group">
+        <span class="footer-label">MISSION</span>
+        <span id="mission-phase" class="footer-value">—</span>
+      </div>
+      <div class="footer-group">
+        <span class="footer-label">PEOPLE</span>
+        <span id="people-count" class="footer-value">0</span>
+      </div>
+      <div class="footer-group">
+        <span class="footer-label">THREATS</span>
+        <span id="threat-count" class="footer-value">0</span>
+      </div>
+      <div class="footer-group">
+        <span class="footer-label">BATTERY</span>
+        <span id="battery-level" class="footer-value">--%</span>
+      </div>
+      <div class="footer-spacer"></div>
+      <div class="footer-buttons">
+        <button class="btn-mode" data-mode="scan">SCAN</button>
+        <button class="btn-mode" data-mode="recon">RECON</button>
+        <button class="btn-mode" data-mode="defuse">DEFUSE</button>
+      </div>
+    </footer>
+
+    <script src="mock.js"></script>
+    <script src="map.js"></script>
+    <script src="intel.js"></script>
+    <script src="defusal.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
