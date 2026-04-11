@@ -20,7 +20,8 @@
   let cssH = 0;
 
   const viewport = {
-    scale: 40, // pixels per metre
+    scaleX: 40, // pixels per metre, x axis
+    scaleY: 40, // pixels per metre, y axis
     centerWX: 5, // world-x at screen center
     centerWY: 5, // world-y at screen center
   };
@@ -43,21 +44,36 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Recompute scale to fit ~12m across the shorter axis.
     const minDim = Math.min(cssW, cssH);
-    viewport.scale = minDim / 12;
+    viewport.scaleX = minDim / 12;
+    viewport.scaleY = minDim / 12;
   }
 
   function toScreenX(wx) {
-    return cssW / 2 + (wx - viewport.centerWX) * viewport.scale;
+    return cssW / 2 + (wx - viewport.centerWX) * viewport.scaleX;
   }
   function toScreenY(wy) {
     // Flip Y so +y world is up on screen.
-    return cssH / 2 - (wy - viewport.centerWY) * viewport.scale;
+    return cssH / 2 - (wy - viewport.centerWY) * viewport.scaleY;
   }
 
   function renderMap(state) {
     if (!ctx) return;
-    if (state.robot) {
-      // Smoothly follow the robot.
+    const mapData = state.slam && state.slam.map;
+    if (mapData && mapData.width && mapData.height) {
+      // Fit the full occupancy grid into the canvas, centered on the map.
+      const res = mapData.resolution || 0.05;
+      const ox = mapData.origin ? mapData.origin.x : 0;
+      const oy = mapData.origin ? mapData.origin.y : 0;
+      const mapW = mapData.width * res;
+      const mapH = mapData.height * res;
+      viewport.centerWX = ox + mapW / 2;
+      viewport.centerWY = oy + mapH / 2;
+      if (cssW > 0 && cssH > 0) {
+        viewport.scaleX = cssW / mapW;
+        viewport.scaleY = cssH / mapH;
+      }
+    } else if (state.robot) {
+      // No map yet — smoothly follow the robot.
       viewport.centerWX += (state.robot.x - viewport.centerWX) * 0.08;
       viewport.centerWY += (state.robot.y - viewport.centerWY) * 0.08;
     }
@@ -92,24 +108,25 @@
 
   function drawGrid() {
     const step = 1; // 1 metre grid
-    const stepPx = step * viewport.scale;
-    if (stepPx < 6) return;
+    const stepPxX = step * viewport.scaleX;
+    const stepPxY = step * viewport.scaleY;
+    if (stepPxX < 6 || stepPxY < 6) return;
 
     ctx.save();
     ctx.strokeStyle = "rgba(98, 0, 238, 0.06)";
     ctx.lineWidth = 1;
     ctx.beginPath();
 
-    const startWX = Math.floor(viewport.centerWX - cssW / (2 * viewport.scale));
-    const endWX = Math.ceil(viewport.centerWX + cssW / (2 * viewport.scale));
+    const startWX = Math.floor(viewport.centerWX - cssW / (2 * viewport.scaleX));
+    const endWX = Math.ceil(viewport.centerWX + cssW / (2 * viewport.scaleX));
     for (let wx = startWX; wx <= endWX; wx++) {
       const sx = toScreenX(wx);
       ctx.moveTo(sx + 0.5, 0);
       ctx.lineTo(sx + 0.5, cssH);
     }
 
-    const startWY = Math.floor(viewport.centerWY - cssH / (2 * viewport.scale));
-    const endWY = Math.ceil(viewport.centerWY + cssH / (2 * viewport.scale));
+    const startWY = Math.floor(viewport.centerWY - cssH / (2 * viewport.scaleY));
+    const endWY = Math.ceil(viewport.centerWY + cssH / (2 * viewport.scaleY));
     for (let wy = startWY; wy <= endWY; wy++) {
       const sy = toScreenY(wy);
       ctx.moveTo(0, sy + 0.5);
@@ -126,13 +143,14 @@
     const res = mapData.resolution || 0.1;
     const ox = mapData.origin ? mapData.origin.x : 0;
     const oy = mapData.origin ? mapData.origin.y : 0;
-    const cellPx = res * viewport.scale;
+    const cellPxX = res * viewport.scaleX;
+    const cellPxY = res * viewport.scaleY;
 
     // Coarse culling: only draw cells whose world rect intersects viewport.
-    const viewMinWX = viewport.centerWX - cssW / (2 * viewport.scale);
-    const viewMaxWX = viewport.centerWX + cssW / (2 * viewport.scale);
-    const viewMinWY = viewport.centerWY - cssH / (2 * viewport.scale);
-    const viewMaxWY = viewport.centerWY + cssH / (2 * viewport.scale);
+    const viewMinWX = viewport.centerWX - cssW / (2 * viewport.scaleX);
+    const viewMaxWX = viewport.centerWX + cssW / (2 * viewport.scaleX);
+    const viewMinWY = viewport.centerWY - cssH / (2 * viewport.scaleY);
+    const viewMaxWY = viewport.centerWY + cssH / (2 * viewport.scaleY);
 
     const minCellX = Math.max(0, Math.floor((viewMinWX - ox) / res));
     const maxCellX = Math.min(
@@ -158,7 +176,7 @@
         const wy = oy + cy * res;
         const sx = toScreenX(wx);
         const sy = toScreenY(wy + res); // top-left on screen (flipped Y)
-        ctx.fillRect(sx, sy, Math.ceil(cellPx) + 1, Math.ceil(cellPx) + 1);
+        ctx.fillRect(sx, sy, Math.ceil(cellPxX) + 1, Math.ceil(cellPxY) + 1);
       }
     }
   }

@@ -51,6 +51,20 @@ MAP_HZ = 1.0
 # LiDAR fallback when /map is empty (large messages — keep slow).
 SCAN_HZ = 0.5
 
+# Radar wallhacks: UDP ingest from ESP32 (or the mock sender in
+# slam/mock_radar_sender.py). Producers send JSON of the form
+#   {"sensor_id": 1, "ts": <float>,
+#    "targets": [{"x_mm": int, "y_mm": int, "v_cms": int}, ...]}
+# Units match the HLK-LD2450 native output (mm, cm/s).
+RADAR_UDP_PORT = 8766
+RADAR_STALE_SECONDS = 1.0
+
+# (dx_m, dy_m, dtheta_rad) — sensor pose relative to robot base_link.
+# Sensor 1 = front center. Measure real offsets on the physical rig.
+SENSOR_MOUNTS: dict[int, tuple[float, float, float]] = {
+    1: (0.20, 0.00, 0.0),
+}
+
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
     return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
@@ -68,6 +82,10 @@ class MapStreamNode(Node):
         self._last_map: OccupancyGrid | None = None
         self._last_scan: LaserScan | None = None
         self._battery_pct: float | None = None
+        # sensor_id -> (ingest_timestamp, list[target-dict-in-map-frame]).
+        # Populated from UDP by RadarProtocol in serve(); consumed by
+        # broadcaster() via radar_snapshot(). All accesses under _lock.
+        self._latest_radar: dict[int, tuple[float, list[dict]]] = {}
 
         # Pose sources we accept, in order of preference. slam_toolbox's
         # /pose is the authoritative map-frame pose during mapping. Subscribe
@@ -130,6 +148,40 @@ class MapStreamNode(Node):
     def _scan_cb(self, msg: LaserScan) -> None:
         with self._lock:
             self._last_scan = msg
+
+    def _store_radar(self, sensor_id: int, targets: list[dict]) -> None:
+        with self._lock:
+            self._latest_radar[sensor_id] = (time.time(), targets)
+
+    @staticmethod
+    def _radar_to_map(
+        x_sensor_m: float,
+        y_sensor_m: float,
+        sensor_offset: tuple[float, float, float],
+        pose: tuple[float, float, float],
+    ) -> tuple[float, float]:
+        """Transform a radar-local (x, y) point into the map frame.
+
+        sensor_offset is the sensor's (dx, dy, dtheta) pose on base_link;
+        pose is the robot's current (x, y, theta) in the map frame.
+        """
+        sdx, sdy, sdt = sensor_offset
+        x_base = sdx + x_sensor_m * math.cos(sdt) - y_sensor_m * math.sin(sdt)
+        y_base = sdy + x_sensor_m * math.sin(sdt) + y_sensor_m * math.cos(sdt)
+        rx, ry, rt = pose
+        x_map = rx + x_base * math.cos(rt) - y_base * math.sin(rt)
+        y_map = ry + x_base * math.sin(rt) + y_base * math.cos(rt)
+        return x_map, y_map
+
+    def radar_snapshot(self) -> list[dict]:
+        """Flat list of all non-stale radar targets in map frame."""
+        now = time.time()
+        out: list[dict] = []
+        with self._lock:
+            for _sid, (ts, targets) in self._latest_radar.items():
+                if now - ts <= RADAR_STALE_SECONDS:
+                    out.extend(targets)
+        return out
 
     def snapshot(
         self,
@@ -270,6 +322,10 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 payload["slam"] = build_scan_payload(scan)
                 last_scan_push = now
 
+            fresh = node.radar_snapshot()
+            if fresh:
+                payload["radar_targets"] = fresh
+
             if clients:
                 msg = json.dumps(payload)
                 stale = []
@@ -282,6 +338,52 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                     clients.discard(c)
 
             await asyncio.sleep(pose_interval)
+
+    class RadarProtocol(asyncio.DatagramProtocol):
+        """Receive radar detections as JSON datagrams and stash them on the node.
+
+        Expected packet schema (one per producer per tick, ~10 Hz):
+            {"sensor_id": 1, "ts": 1234567890.0,
+             "targets": [{"x_mm": 1200, "y_mm": 3400, "v_cms": 20}, ...]}
+        """
+
+        def datagram_received(self, data: bytes, addr) -> None:
+            try:
+                msg = json.loads(data.decode())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return
+            sensor_id = int(msg.get("sensor_id", 0))
+            offset = SENSOR_MOUNTS.get(sensor_id)
+            if offset is None:
+                return
+            with node._lock:
+                pose = node._pose
+            if pose is None:
+                return  # can't transform without a robot pose — drop
+            out: list[dict] = []
+            for i, t in enumerate(msg.get("targets", [])):
+                xm = t.get("x_mm", 0) / 1000.0
+                ym = t.get("y_mm", 0) / 1000.0
+                if xm == 0 and ym == 0:
+                    continue  # LD2450 "no target" sentinel
+                mx, my = node._radar_to_map(xm, ym, offset, pose)
+                out.append({
+                    "id": sensor_id * 10 + i,
+                    "x": mx,
+                    "y": my,
+                    "speed": t.get("v_cms", 0) / 100.0,
+                    "confidence": 0.7,
+                    "confirmed_by_vlm": False,
+                })
+            node._store_radar(sensor_id, out)
+
+    loop = asyncio.get_running_loop()
+    await loop.create_datagram_endpoint(
+        RadarProtocol, local_addr=(host, RADAR_UDP_PORT)
+    )
+    node.get_logger().info(
+        f"radar UDP listener on {host}:{RADAR_UDP_PORT}"
+    )
 
     async with websockets.serve(handler, host, port, process_request=process_request):
         node.get_logger().info(
