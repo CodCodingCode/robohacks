@@ -125,16 +125,21 @@ class VLMSession:
             broadcast(payload)
     """
 
+    # Require this many consecutive threat detections before switching to defusal.
+    THREAT_CONFIRM_COUNT = 3
+
     def __init__(self):
         self.phase: str = "recon"
-        self.rooms_seen: dict[str, dict] = {}   # type -> latest room data
+        self.rooms_seen: dict[str, dict] = {}
         self.threat_active: bool = False
         self.frame_count: int = 0
+        self._consecutive_threats: int = 0
 
     def update(self, image_b64: str) -> dict:
         """Analyze a frame using the current phase, update internal state.
 
-        Automatically switches to defusal phase when a threat is detected.
+        Requires THREAT_CONFIRM_COUNT consecutive threat detections before
+        switching to defusal — avoids false positive phase flips.
         Returns the full dashboard-ready state dict.
         """
         result = analyze_frame(image_b64, phase=self.phase)
@@ -145,11 +150,20 @@ class VLMSession:
             key = room.get("type", "Unknown")
             self.rooms_seen[key] = room
 
-        # Auto-switch to defusal when threat detected.
+        # Count consecutive threat detections before committing to defusal.
         if result.get("mission_phase") == "defuse" or result.get("defusal", {}).get("active"):
-            if not self.threat_active:
-                self.threat_active = True
-                self.phase = "defusal"
+            self._consecutive_threats += 1
+        else:
+            self._consecutive_threats = 0
+
+        if not self.threat_active and self._consecutive_threats >= self.THREAT_CONFIRM_COUNT:
+            self.threat_active = True
+            self.phase = "defusal"
+
+        # Don't broadcast defusal state until confirmed.
+        if not self.threat_active:
+            result.pop("defusal", None)
+            result.pop("mission_phase", None)
 
         # Include cumulative rooms (all rooms seen so far, not just this frame).
         result["rooms_cumulative"] = list(self.rooms_seen.values())
