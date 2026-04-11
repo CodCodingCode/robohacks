@@ -35,18 +35,22 @@
 
     if (els.confidence) {
       const conf = (defusal.confidence || "").toString().toUpperCase();
-      els.confidence.textContent = conf ? `CONFIDENCE: ${conf}` : "—";
-      els.confidence.className = "panel-meta";
-      if (conf === "HIGH") els.confidence.style.color = "#00ff88";
-      else if (conf === "MEDIUM") els.confidence.style.color = "#ffaa00";
-      else if (conf === "LOW") els.confidence.style.color = "#ff4444";
-      else els.confidence.style.color = "";
+      els.confidence.textContent = conf ? `Confidence · ${conf}` : "—";
+      const tier =
+        conf === "HIGH"
+          ? "conf-high"
+          : conf === "MEDIUM"
+            ? "conf-medium"
+            : conf === "LOW"
+              ? "conf-low"
+              : "";
+      els.confidence.className = tier ? `panel-meta ${tier}` : "panel-meta";
     }
 
     if (els.status) {
       els.status.textContent = defusal.awaiting_confirmation
-        ? "AWAITING CONFIRMATION"
-        : "ANALYZING";
+        ? "Awaiting confirmation (view only)"
+        : "Analyzing";
     }
 
     if (els.wires) {
