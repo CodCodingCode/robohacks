@@ -40,7 +40,7 @@ from pathlib import Path
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
-from sensor_msgs.msg import BatteryState, LaserScan
+from sensor_msgs.msg import BatteryState, Image, LaserScan
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 
@@ -50,6 +50,8 @@ POSE_HZ = 10.0
 MAP_HZ = 1.0
 # LiDAR fallback when /map is empty (large messages — keep slow).
 SCAN_HZ = 0.5
+# VLM analysis cadence — Gemini rate limit is 2s minimum.
+VLM_INTERVAL = 3.0
 
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
@@ -68,6 +70,10 @@ class MapStreamNode(Node):
         self._last_map: OccupancyGrid | None = None
         self._last_scan: LaserScan | None = None
         self._battery_pct: float | None = None
+        # Latest compressed camera frame (bytes) for VLM analysis.
+        self._last_image_bytes: bytes | None = None
+        # Latest VLM result — merged into every broadcaster payload.
+        self._vlm_result: dict = {}
 
         # Pose sources we accept, in order of preference. slam_toolbox's
         # /pose is the authoritative map-frame pose during mapping. Subscribe
@@ -87,10 +93,16 @@ class MapStreamNode(Node):
         self.create_subscription(OccupancyGrid, "/map", self._map_cb, map_qos)
         self.create_subscription(BatteryState, "/battery_state", self._battery_cb, 10)
         self.create_subscription(LaserScan, "/scan", self._scan_cb, 10)
+        self.create_subscription(
+            Image,
+            "/mars/main_camera/left/image_raw",
+            self._image_cb,
+            10,
+        )
 
         self.get_logger().info(
             "map_stream_node subscribed to /pose, /odom, /mapping_pose, /map, "
-            "/battery_state, /scan"
+            "/battery_state, /scan, /mars/main_camera/left/image_raw"
         )
 
     def _store_pose(self, x: float, y: float, theta: float, source: str) -> None:
@@ -130,6 +142,36 @@ class MapStreamNode(Node):
     def _scan_cb(self, msg: LaserScan) -> None:
         with self._lock:
             self._last_scan = msg
+
+    def _image_cb(self, msg: Image) -> None:
+        try:
+            import cv2
+            import numpy as np
+            frame = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
+                msg.height, msg.width, -1
+            )
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                with self._lock:
+                    self._last_image_bytes = buf.tobytes()
+        except Exception as exc:
+            self.get_logger().warn(f"image encode failed: {exc}")
+
+    def get_image_b64(self) -> str | None:
+        """Return the latest camera frame as base64, or None if no frame yet."""
+        import base64
+        with self._lock:
+            if self._last_image_bytes is None:
+                return None
+            return base64.b64encode(self._last_image_bytes).decode()
+
+    def set_vlm_result(self, result: dict) -> None:
+        with self._lock:
+            self._vlm_result = result
+
+    def get_vlm_result(self) -> dict:
+        with self._lock:
+            return dict(self._vlm_result)
 
     def snapshot(
         self,
@@ -203,6 +245,38 @@ def _serve_static(request_path: str):
     return 200, ctype or "application/octet-stream", target.read_bytes()
 
 
+def run_vlm_thread(node: MapStreamNode) -> None:
+    """Background thread: grab camera frames and call Gemini every VLM_INTERVAL seconds.
+
+    Results are stored on the node and merged into the next broadcaster payload.
+    Requires GEMINI_API_KEY to be set in the environment.
+    """
+    import os
+    if not os.environ.get("GEMINI_API_KEY"):
+        print("[VLM] GEMINI_API_KEY not set — VLM analysis disabled.")
+        return
+
+    try:
+        from vlm import VLMSession
+    except ImportError:
+        print("[VLM] vlm module not found — run from repo root or add to PYTHONPATH.")
+        return
+
+    session = VLMSession()
+    print("[VLM] VLM thread started.")
+
+    while True:
+        time.sleep(VLM_INTERVAL)
+        image_b64 = node.get_image_b64()
+        if image_b64 is None:
+            continue
+        try:
+            result = session.update(image_b64)
+            node.set_vlm_result(result)
+        except Exception as exc:
+            print(f"[VLM] analysis error: {exc}")
+
+
 async def serve(node: MapStreamNode, host: str, port: int) -> None:
     import websockets
     from websockets.asyncio.server import Response
@@ -270,6 +344,11 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 payload["slam"] = build_scan_payload(scan)
                 last_scan_push = now
 
+            # Merge latest VLM result (rooms, annotations, semantic_plan, etc.)
+            vlm = node.get_vlm_result()
+            if vlm:
+                payload.update(vlm)
+
             if clients:
                 msg = json.dumps(payload)
                 stale = []
@@ -304,6 +383,12 @@ def main() -> None:
         target=lambda: rclpy.spin(node), daemon=True
     )
     spin_thread.start()
+
+    # VLM analysis in its own thread — runs every VLM_INTERVAL seconds.
+    vlm_thread = threading.Thread(
+        target=run_vlm_thread, args=(node,), daemon=True
+    )
+    vlm_thread.start()
 
     try:
         asyncio.run(serve(node, args.host, args.port))
