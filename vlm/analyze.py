@@ -150,20 +150,10 @@ class VLMSession:
             key = room.get("type", "Unknown")
             self.rooms_seen[key] = room
 
-        # Count consecutive threat detections before committing to defusal.
-        if result.get("mission_phase") == "defuse" or result.get("defusal", {}).get("active"):
-            self._consecutive_threats += 1
-        else:
-            self._consecutive_threats = 0
-
-        if not self.threat_active and self._consecutive_threats >= self.THREAT_CONFIRM_COUNT:
-            self.threat_active = True
-            self.phase = "defusal"
-
-        # Don't broadcast defusal state until confirmed.
-        if not self.threat_active:
-            result.pop("defusal", None)
-            result.pop("mission_phase", None)
+        # Never auto-switch phase — operator controls mode manually.
+        # Strip any phase/defusal changes the VLM tries to make.
+        result.pop("defusal", None)
+        result.pop("mission_phase", None)
 
         # Include cumulative rooms (all rooms seen so far, not just this frame).
         result["rooms_cumulative"] = list(self.rooms_seen.values())
