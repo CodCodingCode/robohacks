@@ -18,6 +18,11 @@
   let dpr = 1;
   let cssW = 0;
   let cssH = 0;
+  // Block all rendering (no pan, no robot, no grid) until the first
+  // OccupancyGrid lands. Otherwise the viewport visibly pans from the
+  // default center toward the robot, then snaps to the map-fit when /map
+  // arrives a beat later — which reads as an annoying zoom/scroll animation.
+  let mapReady = false;
 
   const viewport = {
     scaleX: 40, // pixels per metre, x axis
@@ -59,6 +64,17 @@
   function renderMap(state) {
     if (!ctx) return;
     const mapData = state.slam && state.slam.map;
+
+    // Gate: until we've seen the first OccupancyGrid, just render a
+    // static loading screen and bail — no pan, no robot, no grid.
+    if (!mapReady) {
+      if (!(mapData && mapData.width && mapData.height)) {
+        drawLoadingScreen();
+        return;
+      }
+      mapReady = true;
+    }
+
     if (mapData && mapData.width && mapData.height) {
       // Fit the full occupancy grid into the canvas, centered on the map.
       const res = mapData.resolution || 0.05;
@@ -72,10 +88,6 @@
         viewport.scaleX = cssW / mapW;
         viewport.scaleY = cssH / mapH;
       }
-    } else if (state.robot) {
-      // No map yet — smoothly follow the robot.
-      viewport.centerWX += (state.robot.x - viewport.centerWX) * 0.08;
-      viewport.centerWY += (state.robot.y - viewport.centerWY) * 0.08;
     }
 
     ctx.clearRect(0, 0, cssW, cssH);
@@ -102,6 +114,19 @@
       drawRobot(state.robot);
       drawRobotTrail(state.robot);
     }
+  }
+
+  function drawLoadingScreen() {
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.save();
+    ctx.fillStyle = "#fafafa";
+    ctx.fillRect(0, 0, cssW, cssH);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.font = "500 16px Roboto, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Loading SLAM map…", cssW / 2, cssH / 2);
+    ctx.restore();
   }
 
   /* --------------- Background grid --------------- */
