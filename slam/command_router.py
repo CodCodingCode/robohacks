@@ -163,9 +163,17 @@ class MapStreamMobilityAdapter:
         duration = max(0.0, min(float(duration), 3.0))
         deadline = time.time() + duration
         while time.time() < deadline and not self._stop_event.is_set():
-            self._node.publish_twist(linear_x, angular_z)
+            try:
+                self._node.publish_twist(linear_x, angular_z)
+            except Exception:
+                # Publisher context invalid (node reset/restarted) — stop cleanly.
+                self._stop_event.set()
+                return
             time.sleep(0.1)
-        self._node.publish_twist(0.0, 0.0)
+        try:
+            self._node.publish_twist(0.0, 0.0)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
