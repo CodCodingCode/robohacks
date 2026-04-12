@@ -191,36 +191,14 @@ class ReconMovementSkill(Skill):
     def _approach_detected_threat(self, max_duration_s: float):
         self._require_mobility()
         max_duration = min(
-            _clamp_duration(max_duration_s, default=20.0),
+            _clamp_duration(max_duration_s, default=60.0),
             MAX_APPROACH_DURATION_S,
         )
-        remaining = max_duration
-
-        while remaining > 0.0:
-            if self._cancelled:
-                self._stop()
-                return "Approach cancelled", SkillResult.CANCELLED
-
-            image_b64 = self.image
-            if not image_b64:
-                self._stop()
-                return "No camera frame available for threat approach", SkillResult.FAILURE
-
-            result = self._analyze_frame(image_b64)
-            command = self._planner.next_command(result)
-            outcome, budget = self._run_planner_command(command)
-
-            if outcome == SkillResult.SUCCESS:
-                self._stop()
-                return command.reason or "Approach complete", SkillResult.SUCCESS
-            if outcome == SkillResult.FAILURE:
-                self._stop()
-                return command.reason or "Planner command failed", SkillResult.FAILURE
-
-            remaining -= budget
-
-        self._stop()
-        return "Approach timed out; holding position", SkillResult.FAILURE
+        return self._approach_with_think_fast_slow(
+            target="threat",
+            max_duration=max_duration,
+            get_annotation=lambda result: self._planner._find_priority_target(result),
+        )
 
     def _approach_object(self, target: str, max_duration_s: float):
         self._require_mobility()
@@ -233,66 +211,97 @@ class ReconMovementSkill(Skill):
             _clamp_duration(max_duration_s, default=60.0),
             MAX_APPROACH_DURATION_S,
         )
-        remaining = max_duration
+        return self._approach_with_think_fast_slow(
+            target=target,
+            max_duration=max_duration,
+            get_annotation=lambda result: _find_target_annotation(
+                result.get("annotations", []), target
+            ),
+        )
 
-        # Cache VLM result across movement steps — Gemini takes ~3s per call,
-        # so we reuse the last analysis for up to VLM_REUSE_STEPS movements
-        # before re-querying. Only force a fresh call after a rotation (bearing
-        # correction) since the scene has shifted.
-        VLM_REUSE_STEPS = 2
-        steps_since_vlm = VLM_REUSE_STEPS  # force call on first iteration
-        last_result: dict = {}
-        last_command_was_rotation = False
+    def _approach_with_think_fast_slow(
+        self,
+        target: str,
+        max_duration: float,
+        get_annotation,
+    ):
+        """Think-fast / think-slow approach loop.
+
+        Think Slow (VLM):  call Gemini once to locate the target and get its
+                           bearing.  Repeat only after a search spin (target
+                           lost) or after completing a burst of drive steps.
+        Think Fast (drive): once the target is centred, drive forward for
+                            DRIVE_BURSTS × APPROACH_DURATION seconds with NO
+                            VLM calls — just cmd_vel.  This avoids the 3-second
+                            Gemini penalty on every single movement step.
+        """
+        # How many consecutive forward drive steps to take between VLM calls.
+        # Each step = APPROACH_DURATION seconds at APPROACH_SPEED m/s.
+        DRIVE_BURSTS = 3
+
+        remaining = max_duration
 
         while remaining > 0.0:
             if self._cancelled:
                 self._stop()
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
-            # Re-call VLM when: first step, after a rotation, or reuse limit reached.
-            needs_vlm = (
-                steps_since_vlm >= VLM_REUSE_STEPS
-                or last_command_was_rotation
-            )
-            if needs_vlm:
-                image_b64 = self.image
-                if not image_b64:
-                    self._stop()
-                    return f"No camera frame available to approach {target}", SkillResult.FAILURE
-                last_result = self._analyze_frame(image_b64)
-                steps_since_vlm = 0
-            else:
-                steps_since_vlm += 1
+            # ── THINK SLOW: get a fresh perception frame ──────────────────
+            image_b64 = self.image
+            if not image_b64:
+                self._stop()
+                return f"No camera frame available to approach {target}", SkillResult.FAILURE
 
-            annotation = _find_target_annotation(
-                last_result.get("annotations", []),
-                target,
-            )
+            result = self._analyze_frame(image_b64)
+            annotation = get_annotation(result)
+
             if annotation is None:
-                command = RobotCommand(
-                    kind="cmd_vel",
-                    angular_z=SEARCH_SPIN_SPEED_RADPS,
-                    duration=1.0,
-                    reason=f"Searching for {target}",
-                )
-                last_command_was_rotation = True
-                steps_since_vlm = VLM_REUSE_STEPS  # force VLM after search spin
-            else:
-                command = self._object_command(annotation, target)
-                last_command_was_rotation = (command.kind == "rotate")
+                # Target not visible — spin to search, then re-VLM.
+                self._feedback(f"Searching for {target}")
+                dur = min(1.5, remaining)
+                self.mobility.send_cmd_vel(0.0, SEARCH_SPIN_SPEED_RADPS, dur)
+                self._sleep(dur)
+                remaining -= dur
+                continue
 
-            outcome, budget = self._run_planner_command(command)
-            if outcome == SkillResult.SUCCESS:
-                self._stop()
-                return command.reason or f"Arrived near {target}", SkillResult.SUCCESS
-            if outcome == SkillResult.FAILURE:
-                self._stop()
-                return command.reason or f"Could not approach {target}", SkillResult.FAILURE
+            # ── Check arrival ─────────────────────────────────────────────
+            bbox = annotation.get("bbox")
+            if not _valid_bbox(bbox):
+                remaining -= 0.2
+                continue
 
-            remaining -= budget
+            bearing, size_proxy = bbox_to_bearing(bbox)
+
+            if size_proxy >= self._planner.CLOSE_ENOUGH:
+                self._stop()
+                label = annotation.get("label", target)
+                return f"Arrived near {label}", SkillResult.SUCCESS
+
+            # ── THINK SLOW: single bearing correction ─────────────────────
+            if abs(bearing) > self._planner.BEARING_TOLERANCE:
+                angle = _clamp(bearing, -math.pi / 2.0, math.pi / 2.0)
+                rot_dur = min(abs(angle) / MAX_ANGULAR_SPEED_RADPS, MAX_COMMAND_DURATION_S)
+                angular_z = math.copysign(MAX_ANGULAR_SPEED_RADPS, angle)
+                self._feedback(f"Centering on {target} (bearing {bearing:+.2f} rad)")
+                self.mobility.send_cmd_vel(0.0, angular_z, rot_dur)
+                self._sleep(rot_dur)
+                remaining -= rot_dur
+                # Loop back immediately to re-VLM and confirm alignment
+                continue
+
+            # ── THINK FAST: drive forward N bursts without VLM ────────────
+            self._feedback(f"Driving toward {target} (size={size_proxy:.2f})")
+            for _ in range(DRIVE_BURSTS):
+                if self._cancelled or remaining <= 0.0:
+                    break
+                dur = min(self._planner.APPROACH_DURATION, remaining)
+                self.mobility.send_cmd_vel(self._planner.APPROACH_SPEED, 0.0, dur)
+                self._sleep(dur)
+                remaining -= dur
+            # After the burst, loop back to VLM to re-check bearing + arrival.
 
         self._stop()
-        return f"Could not find or reach {target}; holding position", SkillResult.FAILURE
+        return f"Could not reach {target}; holding position", SkillResult.FAILURE
 
     def _object_command(self, annotation: dict, target: str) -> RobotCommand:
         bbox = annotation.get("bbox")
