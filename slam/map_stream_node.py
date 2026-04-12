@@ -324,11 +324,25 @@ class MapStreamNode(Node):
 
     def _merge_into_store(self, new_markers: list[dict]) -> None:
         """Merge freshly-projected markers into the persistent store (lock held by caller)."""
+        MERGE_RADIUS = 1.5  # metres — same label within this radius = same object
         for m in new_markers:
             mid = m.get("id") or ""
             if not mid:
                 continue
+            # Check for exact ID match first (grid-cell dedup).
             existing = self._persistent_markers.get(mid)
+            # If no exact match, check proximity: same label within MERGE_RADIUS.
+            if existing is None:
+                label = m.get("label", "")
+                for eid, ev in self._persistent_markers.items():
+                    if ev.get("label") != label:
+                        continue
+                    dx = ev["x"] - m["x"]
+                    dy = ev["y"] - m["y"]
+                    if (dx * dx + dy * dy) < MERGE_RADIUS * MERGE_RADIUS:
+                        existing = ev
+                        mid = eid  # merge into the existing entry
+                        break
             if existing is None:
                 self._persistent_markers[mid] = dict(m)
             else:

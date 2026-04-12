@@ -254,7 +254,8 @@ html.recon-dark body {
 
 .grid {
   display: grid;
-  grid-template-columns: 1fr 300px;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 200px;
   gap: 0;
   padding: 0;
   min-height: 0;
@@ -412,17 +413,20 @@ html.recon-dark body {
 
 /* ===================== RIGHT COLUMN ===================== */
 
-.right-column {
+.bottom-row {
+  grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: 2fr 1fr 2fr;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
   min-height: 0;
-  border-left: 0.5px solid var(--border);
+  border-top: 0.5px solid var(--border);
 }
 
 /* ===================== SLAM MAP ===================== */
 
 .panel-map {
   min-height: 0;
+  border-left: 0.5px solid var(--border);
 }
 
 .canvas-wrap {
@@ -489,8 +493,7 @@ html.recon-dark body {
 
 .panel-telemetry {
   min-height: 0;
-  border-top: 0.5px solid var(--border);
-  border-bottom: 0.5px solid var(--border);
+  border-right: 0.5px solid var(--border);
 }
 
 .telemetry-feed {

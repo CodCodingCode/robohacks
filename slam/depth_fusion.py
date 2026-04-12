@@ -12,12 +12,12 @@ MAX_DEPTH_M = 6.5
 
 # Assumed depth per category when no depth image is available.
 ASSUMED_DEPTH_M: dict[str, float] = {
-    "person": 2.0,
-    "threat": 1.5,
-    "door": 3.0,
-    "object": 2.0,
-    "furniture": 1.5,
-    "window": 2.5,
+    "person": 1.2,
+    "threat": 1.0,
+    "door": 2.0,
+    "object": 1.0,
+    "furniture": 0.8,
+    "window": 1.5,
 }
 
 
@@ -26,11 +26,12 @@ def assumed_depth_for_category(category: str) -> float:
     return ASSUMED_DEPTH_M.get(str(category or "object").lower(), 2.0)
 
 
-def stable_marker_id(label: str, x: float, y: float, cell_size: float = 0.5) -> str:
+def stable_marker_id(label: str, x: float, y: float, cell_size: float = 1.0) -> str:
     """Stable string ID for an object at world position (x, y).
 
     Two detections of the same label within *cell_size* metres of each other
     will produce the same ID, enabling cross-frame deduplication.
+    Cell size bumped to 1.0m to avoid duplicate markers from depth noise.
     """
     gx = round(x / cell_size)
     gy = round(y / cell_size)

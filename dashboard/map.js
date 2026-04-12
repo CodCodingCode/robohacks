@@ -236,14 +236,31 @@
 
   /* --------------- VLM room labels --------------- */
 
+  const MARKER_COLORS = {
+    threat: "#FF3B3B", // red — bombs, weapons
+    person: "#FF9500", // orange — people
+    object: "#00FF88", // green — general objects
+    door: "#00BFFF", // cyan — doors, exits
+    furniture: "#A78BFA", // purple — furniture
+    window: "#60A5FA", // blue — windows
+  };
+
+  function markerColor(category) {
+    return MARKER_COLORS[category] || MARKER_COLORS.object;
+  }
+
   function drawSemanticMarkers(markers) {
+    // Collect label boxes so we can spread overlapping ones.
+    const placed = []; // {lx, ly, w, h} of already-placed label boxes
+
     for (const marker of markers) {
       const sx = toScreenX(marker.x, marker.y);
       const sy = toScreenY(marker.x, marker.y);
-      const isThreat = marker.category === "threat";
+      const color = markerColor(marker.category);
 
+      // Draw the dot at the actual position.
       ctx.save();
-      ctx.fillStyle = isThreat ? "#FF3B3B" : "#00FF88";
+      ctx.fillStyle = color;
       ctx.beginPath();
       ctx.arc(sx, sy, 4, 0, Math.PI * 2);
       ctx.fill();
@@ -254,19 +271,53 @@
       const boxW = metrics.width + 12;
       const boxH = marker.depth_m != null ? 28 : 18;
 
+      // Find a non-overlapping position for the label box.
+      let lx = sx + 7;
+      let ly = sy - 12;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        let overlap = false;
+        for (const p of placed) {
+          if (
+            lx < p.lx + p.w &&
+            lx + boxW > p.lx &&
+            ly < p.ly + p.h &&
+            ly + boxH > p.ly
+          ) {
+            overlap = true;
+            break;
+          }
+        }
+        if (!overlap) break;
+        // Push the label down by boxH + 4px gap each attempt.
+        ly += boxH + 4;
+      }
+      placed.push({ lx, ly, w: boxW, h: boxH });
+
+      // Draw connector line from dot to label if label shifted.
+      if (Math.abs(ly - (sy - 12)) > 2) {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(lx, ly + boxH / 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
       ctx.fillStyle = "rgba(10,10,10,0.85)";
-      ctx.fillRect(sx + 7, sy - 12, boxW, boxH);
+      ctx.fillRect(lx, ly, boxW, boxH);
       ctx.strokeStyle = "rgba(255,255,255,0.07)";
       ctx.lineWidth = 0.5;
-      ctx.strokeRect(sx + 7, sy - 12, boxW, boxH);
+      ctx.strokeRect(lx, ly, boxW, boxH);
 
-      ctx.fillStyle = isThreat ? "#FF3B3B" : "#888888";
+      ctx.fillStyle = color;
       ctx.textAlign = "left";
-      ctx.fillText(labelText, sx + 13, sy + 1);
+      ctx.fillText(labelText, lx + 6, ly + 13);
       if (marker.depth_m != null && isFinite(marker.depth_m)) {
         ctx.fillStyle = "#444444";
         ctx.font = "400 9px 'JetBrains Mono', monospace";
-        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, sx + 13, sy + 12);
+        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, lx + 6, ly + 24);
       }
       ctx.restore();
     }

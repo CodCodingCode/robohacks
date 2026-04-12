@@ -29,19 +29,53 @@
         <span class="header-clock" id="clock">--:--:--</span>
         <span class="signal-icon" id="signal-icon" title="Signal strength">
           <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
-            <rect x="0" y="9" width="3" height="3" rx="0.5" fill="currentColor" opacity="0.3"/>
-            <rect x="4.5" y="6" width="3" height="6" rx="0.5" fill="currentColor" opacity="0.5"/>
-            <rect x="9" y="3" width="3" height="9" rx="0.5" fill="currentColor" opacity="0.7"/>
-            <rect x="13.5" y="0" width="3" height="12" rx="0.5" fill="currentColor"/>
+            <rect
+              x="0"
+              y="9"
+              width="3"
+              height="3"
+              rx="0.5"
+              fill="currentColor"
+              opacity="0.3"
+            />
+            <rect
+              x="4.5"
+              y="6"
+              width="3"
+              height="6"
+              rx="0.5"
+              fill="currentColor"
+              opacity="0.5"
+            />
+            <rect
+              x="9"
+              y="3"
+              width="3"
+              height="9"
+              rx="0.5"
+              fill="currentColor"
+              opacity="0.7"
+            />
+            <rect
+              x="13.5"
+              y="0"
+              width="3"
+              height="12"
+              rx="0.5"
+              fill="currentColor"
+            />
           </svg>
         </span>
       </div>
     </header>
 
     <main class="grid">
+      <!-- TOP LEFT: Camera feed -->
       <section class="panel panel-camera">
         <span class="corner-tag corner-tag-left">VIDEO FEED</span>
-        <span class="corner-tag corner-tag-right" id="camera-meta">MJPEG · —</span>
+        <span class="corner-tag corner-tag-right" id="camera-meta"
+          >MJPEG · —</span
+        >
         <div class="camera-wrap">
           <img id="camera-feed" alt="camera feed" />
           <div class="scanlines"></div>
@@ -50,26 +84,28 @@
         </div>
       </section>
 
-      <section id="right-column" class="right-column">
-        <div class="panel panel-map">
-          <div class="panel-header">
-            <span class="section-label">SLAM MAP</span>
-            <span class="panel-meta" id="map-meta">
-              <i class="blink-dot" id="map-blink"></i>
-              <span id="map-meta-text">UPDATED LIVE</span>
-            </span>
-          </div>
-          <div class="canvas-wrap">
-            <canvas id="tactical-map"></canvas>
-            <div class="legend">
-              <span><i class="dot dot-cyan"></i>Robot</span>
-              <span><i class="dot dot-green"></i>Confirmed</span>
-              <span><i class="dot dot-amber"></i>Radar</span>
-              <span><i class="dot dot-red"></i>Threat</span>
-            </div>
+      <!-- TOP RIGHT: SLAM Map (now big) -->
+      <div class="panel panel-map">
+        <div class="panel-header">
+          <span class="section-label">SLAM MAP</span>
+          <span class="panel-meta" id="map-meta">
+            <i class="blink-dot" id="map-blink"></i>
+            <span id="map-meta-text">UPDATED LIVE</span>
+          </span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="tactical-map"></canvas>
+          <div class="legend">
+            <span><i class="dot dot-cyan"></i>Robot</span>
+            <span><i class="dot dot-green"></i>Confirmed</span>
+            <span><i class="dot dot-amber"></i>Radar</span>
+            <span><i class="dot dot-red"></i>Threat</span>
           </div>
         </div>
+      </div>
 
+      <!-- BOTTOM ROW: Controls -->
+      <section class="bottom-row">
         <div class="panel panel-telemetry">
           <div class="panel-header">
             <span class="section-label">SENSORS</span>
@@ -96,8 +132,20 @@
             </div>
             <span class="input-hint">Ctrl+Enter to send</span>
             <div class="commands-row">
-              <button type="submit" id="commands-send" class="btn-pill btn-send">SEND</button>
-              <button type="button" id="commands-stop" class="btn-pill btn-stop">STOP</button>
+              <button
+                type="submit"
+                id="commands-send"
+                class="btn-pill btn-send"
+              >
+                SEND
+              </button>
+              <button
+                type="button"
+                id="commands-stop"
+                class="btn-pill btn-stop"
+              >
+                STOP
+              </button>
             </div>
           </form>
         </div>
