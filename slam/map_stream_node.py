@@ -1005,6 +1005,7 @@ class MapStreamNode(Node):
     })
 
     def _parse_manual_motion(self, command: str) -> tuple[str, float, float, float] | None:
+        import re as _re
         tokens = command.split()
         self.get_logger().info(f"[CMD] _parse_manual_motion tokens={tokens}")
 
@@ -1012,6 +1013,25 @@ class MapStreamNode(Node):
         if any(w in tokens for w in self._CONDITIONAL_WORDS):
             self.get_logger().info("[CMD] → conditional word detected, routing to brain")
             return None
+
+        # Degree-based turn: "turn 90 degrees left", "rotate 180 ccw", etc.
+        # Parsed before the token-count gate so multi-word turn commands work.
+        _turn_match = _re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:deg(?:rees?)?|°)?",
+            command,
+        )
+        if _turn_match and any(w in tokens for w in (
+            "turn", "rotate", "spin", "pivot",
+        )):
+            _deg = float(_turn_match.group(1))
+            _rad = math.radians(_deg)
+            _ccw = not any(w in tokens for w in ("right", "clockwise", "cw"))
+            _ang = _MANUAL_TURN_RADPS if _ccw else -_MANUAL_TURN_RADPS
+            _dur = min(_rad / _MANUAL_TURN_RADPS, _MANUAL_MAX_DURATION_S)
+            _label = f"rotate {_deg:.0f}° {'CCW' if _ccw else 'CW'}"
+            self.get_logger().info(f"[CMD] → matched TURN {_deg}° ({'CCW' if _ccw else 'CW'}), dur={_dur:.2f}s")
+            return _label, 0.0, _ang, _dur
+
         # More than 4 tokens is almost certainly natural language, not a simple move.
         if len(tokens) > 4:
             self.get_logger().info("[CMD] → too many tokens (>4), routing to brain")
