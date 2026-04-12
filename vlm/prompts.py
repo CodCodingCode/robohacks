@@ -93,7 +93,7 @@ def defusal_prompt() -> tuple[str, str]:
         '      "category": "<wire | device | component>"\n'
         "    }\n"
         "  ],\n"
-        '  "recommendation": "<which wire to cut and why>",\n'
+        '  "recommendation": "<inspection/localization recommendation; do NOT instruct to cut or flip anything>",\n'
         '  "confidence": "<high | medium | low>",\n'
         '  "semantic_plan": {\n'
         '    "next_action": "<high-level advisory action, e.g. improve view, hold for operator, inspect connection>",\n'
@@ -105,7 +105,8 @@ def defusal_prompt() -> tuple[str, str]:
         "Rules:\n"
         "- List every visible wire with its color and where it appears to connect.\n"
         "- Risk is based on how likely cutting that wire would trigger detonation.\n"
-        "- Recommendation should be the safest action based on visible connections.\n"
+        "- Recommendation should describe what to inspect or localize next for an operator or trained policy.\n"
+        "- Do NOT recommend cutting wires, flipping switches, or any direct manipulation action.\n"
         "- If you cannot clearly see the wiring, set confidence to low.\n"
         f"- {_BBOX_RULE}\n"
         "- Every wire, the device body, and any visible components (timer, battery, "

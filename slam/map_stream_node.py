@@ -428,8 +428,14 @@ class MapStreamNode(Node):
         }
         action = defusal_actions.get(command)
         if action:
-            self.publish_defusal_action(action)
-            return f"Published defusal action {action}", False
+            if action == "ABORT":
+                self.set_autonomy(False)
+                self.stop_manual_motion()
+                return "Abort received; holding position", False
+            return (
+                "Defusal manipulation is not available; use wire inspection/localization only",
+                True,
+            )
 
         motion = self._parse_manual_motion(command)
         if motion is not None:
@@ -734,10 +740,12 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
     from websockets.datastructures import Headers
     try:
         from slam.command_executor import CommandExecutor
+        from slam.command_router import ReconCommandRouter, STOP_COMMANDS, normalize_command
     except ModuleNotFoundError as exc:  # pragma: no cover - script execution fallback.
         if exc.name != "slam":
             raise
         from command_executor import CommandExecutor
+        from command_router import ReconCommandRouter, STOP_COMMANDS, normalize_command
 
     clients: set = set()
 
@@ -757,6 +765,7 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
 
     command_executor = CommandExecutor(node, broadcast_status)
     await command_executor.start()
+    command_router = ReconCommandRouter(node, broadcast_status)
 
     def process_request(connection, request):
         """Return an HTTP Response for non-WebSocket requests (static files).
@@ -803,15 +812,29 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 elif msg.get("cmd") == "defusal_action":
                     action = str(msg.get("action", "")).strip()
                     if action:
-                        node.publish_defusal_action(action)
+                        if action == "ABORT":
+                            node.set_autonomy(False)
+                            node.stop_manual_motion()
+                            await command_router.stop("Abort received; holding position")
+                            await command_executor.stop()
+                        else:
+                            await ws.send(json.dumps({
+                                "type": "status",
+                                "phase": "error",
+                                "text": "Defusal manipulation is not available; use wire inspection/localization only",
+                            }))
                 elif msg.get("cmd") == "operator_command":
                     text = str(msg.get("text", "")).strip()
-                    status, is_error = node.handle_operator_command(text)
-                    await ws.send(json.dumps({
-                        "type": "status",
-                        "phase": "error" if is_error else "done",
-                        "text": status,
-                    }))
+                    if await command_router.handle(text):
+                        if normalize_command(text) in STOP_COMMANDS:
+                            await command_executor.stop()
+                    else:
+                        status, is_error = node.handle_operator_command(text)
+                        await ws.send(json.dumps({
+                            "type": "status",
+                            "phase": "error" if is_error else "done",
+                            "text": status,
+                        }))
                 elif msg.get("type") == "action":
                     text = str(msg.get("text", "")).strip()
                     if not text:
@@ -822,11 +845,9 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                         }))
                         continue
 
-                    command = " ".join(text.lower().replace("_", " ").split())
-                    if command in {"stop", "halt", "emergency stop", "e stop", "estop"}:
-                        node.set_autonomy(False)
-                        node.stop_manual_motion()
-                        await command_executor.stop()
+                    if await command_router.handle(text):
+                        if normalize_command(text) in STOP_COMMANDS:
+                            await command_executor.stop()
                         continue
 
                     status, is_error = node.handle_operator_command(text)
@@ -848,6 +869,7 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 elif msg.get("type") == "stop":
                     node.set_autonomy(False)
                     node.stop_manual_motion()
+                    await command_router.stop()
                     await command_executor.stop()
         finally:
             clients.discard(ws)
