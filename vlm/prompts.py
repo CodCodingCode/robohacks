@@ -23,6 +23,13 @@ _SEMANTIC_PLAN_RULE = (
     "a direct motor command, velocity command, or low-level motion-control instruction."
 )
 
+_STANDOFF_RULE = (
+    "Proximity rule: the robot must maintain a minimum standoff distance of 15 cm from "
+    "any threat or target. If a threat or target appears to occupy more than ~60% of the "
+    "frame height (i.e. the robot is within ~15 cm), set proximity_warning to true and "
+    "advise halting immediately in the semantic_plan."
+)
+
 
 def recon_prompt() -> tuple[str, str]:
     """Room scanning during the recon phase."""
@@ -48,8 +55,13 @@ def recon_prompt() -> tuple[str, str]:
         "    }\n"
         "  ],\n"
         '  "threat_detected": <bool, true if ANY item looks like an explosive device>,\n'
+        '  "traversal_threat_alert": {\n'
+        '    "active": <bool, true if a threat is visible while the robot is traversing>,\n'
+        '    "description": "<brief description of the detected threat, or empty string if none>"\n'
+        "  },\n"
+        '  "proximity_warning": <bool, true if any threat or target is within ~15 cm (fills >60% of frame height)>,\n'
         '  "semantic_plan": {\n'
-        '    "next_action": "<high-level advisory action, e.g. continue scan, inspect object, hold for operator>",\n'
+        '    "next_action": "<high-level advisory action, e.g. continue scan, inspect object, halt — proximity limit reached, hold for operator>",\n'
         '    "rationale": "<short explanation grounded in the visible frame>",\n'
         '    "confidence": "<high | medium | low>"\n'
         "  }\n"
@@ -63,10 +75,13 @@ def recon_prompt() -> tuple[str, str]:
         "exposed wires, timers, packages with wires, pipe-like objects with attached electronics, etc.\n"
         "- If nothing suspicious is visible, threats should be an empty list and "
         "threat_detected should be false.\n"
+        "- Set traversal_threat_alert.active to true whenever a threat is visible, regardless "
+        "of mission phase; always populate description when active.\n"
         "- People count should only include clearly visible humans.\n"
         f"- {_BBOX_RULE}\n"
         "- Every person and threat MUST have an annotation with a bounding box.\n"
         "- Include annotations for important objects like doors, desks, and windows too.\n"
+        f"- {_STANDOFF_RULE}\n"
         f"- {_SEMANTIC_PLAN_RULE}"
     )
     return system, user
@@ -99,8 +114,9 @@ def defusal_prompt() -> tuple[str, str]:
         "  ],\n"
         '  "recommendation": "<inspection/localization recommendation; do NOT instruct to cut or flip anything>",\n'
         '  "confidence": "<high | medium | low>",\n'
+        '  "proximity_warning": <bool, true if the device fills >60% of frame height, indicating the robot is within ~15 cm>,\n'
         '  "semantic_plan": {\n'
-        '    "next_action": "<high-level advisory action, e.g. improve view, hold for operator, inspect connection>",\n'
+        '    "next_action": "<high-level advisory action, e.g. improve view, hold for operator, inspect connection, halt — proximity limit reached>",\n'
         '    "rationale": "<short explanation grounded in the visible wiring>",\n'
         '    "confidence": "<high | medium | low>"\n'
         "  }\n"
@@ -115,6 +131,7 @@ def defusal_prompt() -> tuple[str, str]:
         f"- {_BBOX_RULE}\n"
         "- Every wire, the device body, and any visible components (timer, battery, "
         "detonator) MUST have an annotation with a bounding box.\n"
+        f"- {_STANDOFF_RULE}\n"
         f"- {_SEMANTIC_PLAN_RULE}"
     )
     return system, user
