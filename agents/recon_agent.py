@@ -23,10 +23,10 @@ class ReconAgent(Agent):
         return "Recon Agent"
 
     def get_skills(self) -> List[str]:
-        return ["local/recon_movement", "yellow"]
+        return ["recon_movement", "yellow"]
 
     def get_inputs(self) -> List[str]:
-        return []  # was ["micro"] — voice input/output disabled
+        return ["micro"]
 
     def get_prompt(self) -> str:
         return """
@@ -58,14 +58,15 @@ recon_movement action mapping:
 If the message says "Call recon_movement skill with action=X and target=Y", call it with exactly those parameters immediately.
 
 ━━━ PHASE 2: DEFUSAL ━━━
-Once the robot has reached the device and the VLM has analysed the wires, call the yellow skill to interact with the yellow wire.
+Once the robot is confirmed to be at the bomb device, call the yellow skill to
+interact with the yellow wire.
 
-Call yellow when ANY of these is true:
-- recon_movement returns a result containing "Arrived near" — the robot has reached
-  the device; call yellow immediately, no confirmation needed
-- The operator says "cut yellow", "pull yellow", "yellow wire", "defuse yellow", or similar
-- The VLM defusal analysis identifies yellow as the recommended action target
+Call yellow ONLY when:
+- The operator explicitly says "cut yellow", "pull yellow", "yellow wire",
+  "defuse yellow", or any clear instruction to act on the yellow wire
+- The VLM defusal analysis recommends the yellow wire as the action target
 
-yellow skill: no parameters needed — call it immediately when triggered.
-Do NOT call yellow during recon or approach. Only call it when the robot is already at the device.
+Do NOT call yellow automatically when the robot arrives somewhere.
+Do NOT call yellow unless the robot is confirmed at the bomb device.
+yellow skill takes no parameters.
 """
