@@ -39,6 +39,7 @@ import asyncio
 import json
 import math
 import mimetypes
+import socket
 import sys
 import threading
 import time
@@ -88,6 +89,138 @@ SCAN_HZ = 1.0
 VLM_INTERVAL = 2.0
 SEMANTIC_MARKER_TTL = 8.0
 AUTONOMY_SWITCHING_ENABLED = False
+
+# LD2450 radar UDP ingest
+RADAR_UDP_PORT = 8766
+RADAR_TARGET_TTL = 1.5  # seconds before a target is considered stale
+
+# Sensor mount offsets in metres, relative to robot center (matching geometry.json).
+# x = lateral (negative = left), y = forward.
+SENSOR_MOUNTS: dict[int, tuple[float, float]] = {
+    0: (-0.120, 0.0),   # S0: 120mm left
+    1: ( 0.000, 0.0),   # S1: center
+    2: ( 0.120, 0.0),   # S2: 120mm right
+}
+
+
+class RadarListener:
+    """Reads LD2450 detections from ESP32 nodes via USB serial, and optionally
+    from UDP (for mock_radar_sender.py testing).
+
+    Serial packets from the ESPs arrive as JSON lines:
+        {"msg": "detections", "node_id": "A",
+         "detections": [{"sensor_id": "S0", "x_mm": 450, "y_mm": 2000,
+                         "speed_cms": 0, "active": true, ...}, ...]}
+
+    UDP mock packets (mock_radar_sender.py):
+        {"sensor_id": 1, "ts": <float>,
+         "targets": [{"x_mm": int, "y_mm": int, "v_cms": int}]}
+    """
+
+    _SID_TO_IDX: dict[str, int] = {"S0": 0, "S1": 1, "S2": 2}
+
+    def __init__(
+        self,
+        serial_ports: dict[str, str] | None = None,
+        udp_port: int = RADAR_UDP_PORT,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._targets: dict[int, list[tuple[float, float, float, float]]] = {}
+
+        self._serial_rx = None
+        if serial_ports:
+            try:
+                from transport_serial import SerialNodeReceiver
+            except ImportError:
+                from slam.transport_serial import SerialNodeReceiver
+            self._serial_rx = SerialNodeReceiver(serial_ports)
+            self._serial_rx.start()
+            self._serial_thread = threading.Thread(
+                target=self._serial_poll_loop, daemon=True
+            )
+            self._serial_thread.start()
+
+        self._udp_thread = threading.Thread(
+            target=self._udp_loop, args=(udp_port,), daemon=True
+        )
+        self._udp_thread.start()
+
+    def _serial_poll_loop(self) -> None:
+        while True:
+            pkt = self._serial_rx.pop()
+            if pkt is None:
+                time.sleep(0.01)
+                continue
+            data = pkt.data
+            if data.get("msg") != "detections":
+                continue
+            now = time.time()
+            for det in data.get("detections", []):
+                if not det.get("active", False):
+                    continue
+                sid = str(det.get("sensor_id", ""))
+                idx = self._SID_TO_IDX.get(sid)
+                if idx is None:
+                    continue
+                x_m = int(det.get("x_mm", 0)) / 1000.0
+                y_m = int(det.get("y_mm", 0)) / 1000.0
+                speed = int(det.get("speed_cms", 0)) / 100.0
+                with self._lock:
+                    self._targets.setdefault(idx, []).append(
+                        (x_m, y_m, speed, now)
+                    )
+
+    def _udp_loop(self, port: int) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        while True:
+            try:
+                data, _ = sock.recvfrom(4096)
+                msg = json.loads(data)
+                sid = int(msg.get("sensor_id", 0))
+                now = time.time()
+                targets = []
+                for t in msg.get("targets", []):
+                    x_m = t["x_mm"] / 1000.0
+                    y_m = t["y_mm"] / 1000.0
+                    speed = t.get("v_cms", 0) / 100.0
+                    targets.append((x_m, y_m, speed, now))
+                with self._lock:
+                    self._targets[sid] = targets
+            except Exception:
+                pass
+
+    def get_world_targets(
+        self,
+        robot_pose: tuple[float, float, float] | None,
+    ) -> list[dict]:
+        now = time.time()
+        rx, ry, theta = robot_pose if robot_pose else (0.0, 0.0, 0.0)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+
+        result: list[dict] = []
+        tid = 0
+        with self._lock:
+            for sid, targets in self._targets.items():
+                mx, my = SENSOR_MOUNTS.get(sid, (0.0, 0.0))
+                fresh = [t for t in targets if (now - t[3]) < RADAR_TARGET_TTL]
+                self._targets[sid] = fresh
+                for lx, ly, speed, _ts in fresh:
+                    rel_x = mx + lx
+                    rel_y = my + ly
+                    wx = rx + rel_x * cos_t - rel_y * sin_t
+                    wy = ry + rel_x * sin_t + rel_y * cos_t
+                    result.append({
+                        "id": tid,
+                        "x": round(wx, 3),
+                        "y": round(wy, 3),
+                        "speed": round(speed, 2),
+                        "confidence": 0.7,
+                    })
+                    tid += 1
+        return result
 
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
@@ -1183,7 +1316,7 @@ def run_vlm_thread(node: MapStreamNode) -> None:
             traceback.print_exc()
 
 
-async def serve(node: MapStreamNode, host: str, port: int) -> None:
+async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener | None = None) -> None:
     import websockets
     from websockets.asyncio.server import Response
     from websockets.datastructures import Headers
@@ -1376,6 +1509,8 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 payload.update(vlm)
                 last_vlm_push_ts = vlm_ts
             payload["semantic_markers"] = node.get_persistent_markers()
+            if radar is not None:
+                payload["radar_targets"] = radar.get_world_targets(pose)
             payload["autonomy"] = node.get_planner_state()
             node._check_diagnostics()
             # Only consume the alert when there are clients — if no browser is
@@ -1545,7 +1680,28 @@ def main() -> None:
     ap.add_argument("--depth-topic", default=DEFAULT_DEPTH_TOPIC)
     ap.add_argument("--camera-info-topic", default=DEFAULT_CAMERA_INFO_TOPIC)
     ap.add_argument("--depth-scale", type=float, default=0.001)
+    ap.add_argument(
+        "--radar-serial",
+        nargs="*",
+        metavar="NODE=PORT",
+        help="ESP serial ports, e.g. A=/dev/ttyUSB0 B=/dev/ttyUSB1",
+    )
+    ap.add_argument("--radar-udp-port", type=int, default=RADAR_UDP_PORT)
     args = ap.parse_args()
+
+    # Parse radar serial port mapping — default to auto-detecting both ESPs.
+    if args.radar_serial:
+        radar_serial_ports: dict[str, str] = {}
+        for pair in args.radar_serial:
+            node_id, port = pair.split("=", 1)
+            radar_serial_ports[node_id] = port
+    else:
+        radar_serial_ports = {"A": "AUTO", "B": "AUTO"}
+
+    radar = RadarListener(
+        serial_ports=radar_serial_ports,
+        udp_port=args.radar_udp_port,
+    )
 
     rclpy.init()
     node = MapStreamNode(
@@ -1573,7 +1729,7 @@ def main() -> None:
     planner_thread.start()
 
     try:
-        asyncio.run(serve(node, args.host, args.port))
+        asyncio.run(serve(node, args.host, args.port, radar=radar))
     except KeyboardInterrupt:
         pass
     finally:

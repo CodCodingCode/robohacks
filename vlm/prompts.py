@@ -39,6 +39,7 @@ def recon_prompt() -> tuple[str, str]:
         "\n"
         "Return JSON with this exact schema:\n"
         "{\n"
+        '  "reasoning": "<one sentence: what suspicious items, if any, are visible and why>",\n'
         '  "rooms": [\n'
         "    {\n"
         '      "type": "<room type, e.g. Kitchen, Hallway, Office, Lobby>",\n'
@@ -71,10 +72,20 @@ def recon_prompt() -> tuple[str, str]:
         "\n"
         "Rules:\n"
         "- List every distinct room area visible in the frame.\n"
-        "- A threat is specifically a brown cardboard box approximately shoebox-sized "
-        "with electronics (e.g. a breadboard) and wires attached to the exterior top surface; "
-        "classify this as a bomb. Also flag any other item resembling an explosive device: "
-        "exposed wires, timers, packages with wires, pipe-like objects with attached electronics, etc.\n"
+        "- A threat matches TWO OR MORE of these visual features: "
+        "(1) a cardboard or plain box of any size, "
+        "(2) colored wires running along its surface, "
+        "(3) a green rectangular circuit board (breadboard) sitting on top, "
+        "(4) loose electronic components (battery, timer, LED) attached to it. "
+        "The primary target device is a brown cardboard box approximately shoebox-sized "
+        "with a breadboard and wires on its exterior top surface — classify this as a bomb. "
+        "Also flag exposed wires, timers, packages with wires, or pipe-like objects with electronics.\n"
+        "- If a cardboard box is visible but you cannot clearly see its top surface "
+        "(partial view, distance, occlusion), set threat_detected=true and confidence=low "
+        "rather than leaving it undetected. A missed threat is far more dangerous than a false alarm.\n"
+        "- If threat_detected=true, there MUST be at least one annotation with "
+        'category="threat". If you cannot draw a precise bbox, estimate the region '
+        "where the suspicious object appears — do not leave threat_detected=true without an annotation.\n"
         "- If nothing suspicious is visible, threats should be an empty list and "
         "threat_detected should be false.\n"
         "- Set traversal_threat_alert.active to true whenever a threat is visible, regardless "
