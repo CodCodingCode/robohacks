@@ -1238,7 +1238,10 @@ def build_scan_payload(scan: LaserScan) -> dict:
             "angle_increment": float(scan.angle_increment),
             "range_min": float(scan.range_min),
             "range_max": float(scan.range_max),
-            "ranges": [float(r) for r in scan.ranges],
+            "ranges": [
+                float(r) if math.isfinite(r) else None
+                for r in scan.ranges
+            ],
         }
     }
 
@@ -1640,6 +1643,8 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
 
             if clients:
                 msg = json.dumps(payload)
+                if "Infinity" in msg or "NaN" in msg:
+                    msg = msg.replace("-Infinity", "null").replace("Infinity", "null").replace("NaN", "null")
                 stale = []
                 for c in list(clients):
                     try:
