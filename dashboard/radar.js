@@ -19,10 +19,24 @@
 
   let lastTargets = [];
   let lastUpdateTs = 0;
+  let robotPose = null; // {x, y, theta} — needed to transform world→local
 
   // Afterglow: store blip positions with timestamp for fade trail
-  let blipHistory = []; // [{sx, sy, ts, confidence}, ...]
+  let blipHistory = []; // [{x, y, ts, confidence}, ...] world coords
   const MAX_BLIP_HISTORY = 60;
+
+  function _toLocal(wx, wy) {
+    if (!robotPose || robotPose.x == null) return { fwd: wx, lat: wy };
+    const dx = wx - robotPose.x;
+    const dy = wy - robotPose.y;
+    const theta = robotPose.theta || 0;
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+    return {
+      fwd: cosT * dx + sinT * dy,
+      lat: -sinT * dx + cosT * dy,
+    };
+  }
 
   function _resizeScope() {
     if (!scopeCanvas) return;
@@ -48,9 +62,10 @@
     }
   }
 
-  function renderRadar(radarTargets) {
+  function renderRadar(radarTargets, robot) {
     if (!radarTargets) radarTargets = [];
     lastTargets = radarTargets;
+    robotPose = robot || null;
     if (radarTargets.length > 0) lastUpdateTs = Date.now();
 
     // Push current targets into afterglow history
@@ -154,13 +169,14 @@
     scopeCtx.stroke();
     scopeCtx.restore();
 
-    // Afterglow blips
+    // Afterglow blips (stored in world coords, transformed at render time)
     for (const blip of blipHistory) {
       const age = now - blip.ts;
       if (age > AFTERGLOW_FADE_MS) continue;
       const fade = 1 - age / AFTERGLOW_FADE_MS;
-      const bx = cx + blip.x * scale;
-      const by = cy - blip.y * scale;
+      const local = _toLocal(blip.x, blip.y);
+      const bx = cx - local.lat * scale;
+      const by = cy - local.fwd * scale;
       if (bx < 0 || bx > w || by < 0 || by > h) continue;
 
       scopeCtx.save();
@@ -172,10 +188,11 @@
       scopeCtx.restore();
     }
 
-    // Live target dots
+    // Live target dots (world → robot-local)
     for (const t of targets) {
-      const sx = cx + (t.x || 0) * scale;
-      const sy = cy - (t.y || 0) * scale;
+      const local = _toLocal(t.x || 0, t.y || 0);
+      const sx = cx - local.lat * scale;
+      const sy = cy - local.fwd * scale;
       if (sx < 0 || sx > w || sy < 0 || sy > h) continue;
 
       const pulse = (6 + Math.sin(now / 300 + (t.id || 0)) * 2) * dpr;

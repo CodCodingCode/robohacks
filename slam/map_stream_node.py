@@ -117,7 +117,18 @@ class RadarListener:
          "targets": [{"x_mm": int, "y_mm": int, "v_cms": int}]}
     """
 
-    _SID_TO_IDX: dict[str, int] = {"S0": 0, "S1": 1, "S2": 2}
+    _SID_TO_IDX: dict[str, int] = {
+        "S0": 0, "S1": 1, "S2": 2,
+        "0": 0,  "1": 1,  "2": 2,
+    }
+
+    @staticmethod
+    def _parse_sensor_idx(raw_sid) -> int | None:
+        """Map sensor_id to internal index, handling 'S0' strings, bare '0' strings, and ints."""
+        if isinstance(raw_sid, int):
+            return raw_sid if 0 <= raw_sid <= 2 else None
+        s = str(raw_sid).strip().upper()
+        return RadarListener._SID_TO_IDX.get(s)
 
     def __init__(
         self,
@@ -164,21 +175,23 @@ class RadarListener:
                 continue
             now = time.time()
             active_count = 0
+            new_targets: dict[int, list[tuple[float, float, float, float]]] = {}
             for det in data.get("detections", []):
                 if not det.get("active", False):
                     continue
-                sid = str(det.get("sensor_id", ""))
-                idx = self._SID_TO_IDX.get(sid)
+                idx = self._parse_sensor_idx(det.get("sensor_id", ""))
                 if idx is None:
                     continue
                 x_m = int(det.get("x_mm", 0)) / 1000.0
                 y_m = int(det.get("y_mm", 0)) / 1000.0
                 speed = int(det.get("speed_cms", 0)) / 100.0
-                with self._lock:
-                    self._targets.setdefault(idx, []).append(
-                        (x_m, y_m, speed, now)
-                    )
+                new_targets.setdefault(idx, []).append(
+                    (x_m, y_m, speed, now)
+                )
                 active_count += 1
+            with self._lock:
+                for idx, targets in new_targets.items():
+                    self._targets[idx] = targets
             self._serial_det_count += 1
             if self._serial_det_count <= 3 or self._serial_det_count % 100 == 0:
                 print(f"[RADAR] Serial frame #{self._serial_det_count} from {pkt.node_id}: {active_count} active targets")

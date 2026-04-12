@@ -327,7 +327,7 @@
   function renderAll() {
     ReconIntel.renderIntel(state.rooms || [], null, state.radar_targets || []);
     ReconTelemetry.renderTelemetry(state.telemetry || [], telemetryEl);
-    ReconRadar.renderRadar(state.radar_targets || []);
+    ReconRadar.renderRadar(state.radar_targets || [], state.robot);
     ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     ReconIntel.logPlanUpdate(null, state.semantic_plan);
