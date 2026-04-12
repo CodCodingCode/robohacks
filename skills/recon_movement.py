@@ -140,6 +140,110 @@ def _get_cached_annotations(max_age_s: float = 4.0) -> list | None:
             return list(_vlm_cache.get("annotations", []))
     return None
 
+
+# ---------------------------------------------------------------------------
+# Depth camera cache
+# ---------------------------------------------------------------------------
+# Subscribe to the OAK-D depth topic and camera_info so the approach loop
+# can read real-time distance and bearing without blocking on VLM calls.
+
+_depth_lock = threading.Lock()
+_depth_image = None       # np.ndarray | None, metres, from decode_depth_image
+_depth_cam_info = None    # dict | None, from camera_info_to_dict
+_depth_node = None
+
+_DEPTH_TOPIC = "/mars/main_camera/depth/image_rect_raw"
+_CAM_INFO_TOPIC = "/mars/main_camera/left/camera_info"
+
+
+def _try_start_depth_subscriber() -> None:
+    """Create a minimal rclpy node to subscribe to depth + camera_info. Idempotent."""
+    global _depth_node
+    if _depth_node is not None:
+        return
+    try:
+        import rclpy                                       # noqa: PLC0415
+        from sensor_msgs.msg import Image, CameraInfo     # noqa: PLC0415
+        from slam.depth_fusion import (                   # noqa: PLC0415
+            decode_depth_image,
+            camera_info_to_dict,
+        )
+
+        if not rclpy.ok():
+            return
+
+        node = rclpy.create_node("recon_movement_depth_listener")
+
+        def _depth_cb(msg: Image) -> None:
+            global _depth_image
+            try:
+                arr = decode_depth_image(
+                    bytes(msg.data), msg.width, msg.height,
+                    msg.encoding, msg.step,
+                )
+                with _depth_lock:
+                    _depth_image = arr
+            except Exception:
+                pass
+
+        def _cam_info_cb(msg: CameraInfo) -> None:
+            global _depth_cam_info
+            try:
+                from slam.depth_fusion import camera_info_to_dict as _c  # noqa: PLC0415
+                info = _c(msg)
+                if info:
+                    with _depth_lock:
+                        _depth_cam_info = info
+            except Exception:
+                pass
+
+        node.create_subscription(Image, _DEPTH_TOPIC, _depth_cb, 10)
+        node.create_subscription(CameraInfo, _CAM_INFO_TOPIC, _cam_info_cb, 10)
+        t = threading.Thread(
+            target=lambda: rclpy.spin(node),
+            daemon=True,
+            name="recon_depth_spin",
+        )
+        t.start()
+        _depth_node = node
+    except Exception:
+        pass
+
+
+def _get_depth_at_bbox(bbox: list) -> float | None:
+    """Return median depth in metres at the bbox centre, or None."""
+    _try_start_depth_subscriber()
+    with _depth_lock:
+        depth_m = _depth_image
+        cam_info = dict(_depth_cam_info) if _depth_cam_info else None
+    if depth_m is None:
+        return None
+    try:
+        from slam.depth_fusion import sample_depth_at_bbox  # noqa: PLC0415
+        return sample_depth_at_bbox(depth_m, bbox)
+    except Exception:
+        return None
+
+
+def _get_bearing_rad(bbox: list) -> float:
+    """Return horizontal bearing (rad) from camera intrinsics, or bbox fallback."""
+    _try_start_depth_subscriber()
+    with _depth_lock:
+        depth_m = _depth_image
+        cam_info = dict(_depth_cam_info) if _depth_cam_info else None
+    image_width = depth_m.shape[1] if depth_m is not None else 1000
+    try:
+        from slam.depth_fusion import bbox_bearing_rad  # noqa: PLC0415
+        result = bbox_bearing_rad(bbox, image_width, cam_info)
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    # Fallback: use simple FOV formula from planner
+    x_center = (float(bbox[1]) + float(bbox[3])) / 2.0
+    return (x_center - 500.0) / 500.0 * 0.6   # 0.6 = FOV/2 ≈ 1.2 rad / 2
+
+
 from vlm.planner import Planner, RobotCommand, bbox_to_bearing
 
 try:
@@ -250,6 +354,7 @@ class ReconMovementSkill(Skill):
         self._planner = planner or Planner()
         self._sleep = sleeper
         self._cancelled = False
+        self._search_dir: int = 1   # alternates ±1 each re-acquire spin
 
     @property
     def name(self) -> str:
@@ -494,25 +599,27 @@ class ReconMovementSkill(Skill):
         max_duration: float,
         get_annotation,
     ):
-        """Think-fast / think-slow approach loop.
+        """Depth-sensor approach loop.
 
-        Think Slow (VLM): Gemini call to locate the target, measure bearing
-            and approximate distance (via bbox size proxy).  Only called after
-            a search spin or after completing a burst of drive steps.
+        VLM provides target detection and bbox (refreshed from the background
+        thread cache every ~2 s).  The depth camera provides real-time bearing
+        and distance for each short drive step, so the robot re-evaluates its
+        heading and distance every 0.4 s without waiting for a Gemini call.
 
-        Think Fast (P-controller + adaptive burst):
-            • angular_z = -Kp × bearing (bbox bearing is positive to the right)
-            • forward speed scaled down when bearing is large (pointing away)
-            • burst duration capped to estimated remaining distance so the
-              robot does not overshoot
-            • angular correction decays across bursts (first burst corrects,
-              later bursts drive straighter)
+        If the depth camera returns no valid reading the loop falls back to the
+        bbox size proxy for arrival detection and keeps a running miss count;
+        after several consecutive misses it forces a fresh VLM call so a new
+        bbox can be attempted.
+
+        Spin direction alternates (±) each time the target is lost to avoid
+        the robot circling away from the target indefinitely.
         """
-        # P-controller gain. bbox_to_bearing returns positive for targets to
-        # the right in image space; cmd_vel.angular_z is positive left/CCW.
-        Kp = 1.4
-        # How many drive steps between VLM re-checks
-        DRIVE_BURSTS = 3
+        # --- tunables --------------------------------------------------------
+        STEP_S    = 0.4    # seconds per sensor step (short = frequent re-eval)
+        ALIGN_TOL = 0.08   # rad (~4.5°) bearing dead-zone before driving
+        CLOSE_M   = 0.45   # depth-based stop distance (metres)
+        Kp        = 1.4    # bearing → angular_z gain
+        # ---------------------------------------------------------------------
 
         remaining = max_duration
 
@@ -521,15 +628,11 @@ class ReconMovementSkill(Skill):
                 self._stop()
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
-            # ── THINK SLOW: perception frame ──────────────────────────────
-            # Always prefer cached annotations from the background VLM thread
-            # (published every ~2s to /recon/vlm_annotations) to avoid
-            # blocking the approach loop with synchronous Gemini calls.
-            cached = _get_cached_annotations(max_age_s=8.0)
+            # ── Get latest VLM annotation (cache preferred) ───────────────
+            cached = _get_cached_annotations(max_age_s=2.5)
             if cached is not None:
                 result = {"annotations": cached}
             else:
-                # Cold start fallback: cache never populated yet.
                 image_b64 = self.image
                 if not image_b64:
                     self._stop()
@@ -539,73 +642,68 @@ class ReconMovementSkill(Skill):
             annotation = get_annotation(result)
 
             if annotation is None:
+                # Target not visible — alternate spin direction to search.
                 self._feedback(f"Searching for {target}")
+                self._search_dir *= -1
                 dur = min(1.5, remaining)
-                self.mobility.send_cmd_vel(0.0, SEARCH_SPIN_SPEED_RADPS, dur)
+                self.mobility.send_cmd_vel(
+                    0.0, SEARCH_SPIN_SPEED_RADPS * self._search_dir, dur
+                )
                 self._sleep(dur)
                 remaining -= dur
                 continue
 
             bbox = annotation.get("bbox")
             if not _valid_bbox(bbox):
-                remaining -= 0.2
+                remaining -= 0.1
                 continue
 
-            bearing, size_proxy = bbox_to_bearing(bbox)
+            # ── Sensor readings ───────────────────────────────────────────
+            depth   = _get_depth_at_bbox(bbox)   # metres, or None (falls back to size proxy)
+            bearing = _get_bearing_rad(bbox)      # rad, camera-intrinsics preferred
 
             # ── Arrival check ─────────────────────────────────────────────
+            if depth is not None and depth <= CLOSE_M:
+                self._stop()
+                return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
+            _, size_proxy = bbox_to_bearing(bbox)
             if size_proxy >= self._planner.CLOSE_ENOUGH:
                 self._stop()
-                label = annotation.get("label", target)
-                return f"Arrived near {label}", SkillResult.SUCCESS
+                return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
 
-            # ── Adaptive burst duration from size proxy ───────────────────
-            # size_proxy ≈ CLOSE_ENOUGH at CLOSE_ENOUGH_M distance, so:
-            # estimated_dist ≈ CLOSE_ENOUGH_M × sqrt(CLOSE_ENOUGH / size_proxy)
-            if size_proxy > 0.01:
-                estimated_dist = self._planner.CLOSE_ENOUGH_M * math.sqrt(
-                    self._planner.CLOSE_ENOUGH / max(size_proxy, 0.01)
+            # ── Obstacle check ───────────────────────────────────────────
+            fwd = _get_min_forward_m()
+            if fwd is not None and fwd < _OBSTACLE_STOP_M:
+                self._stop()
+                self._feedback(f"Obstacle {fwd:.2f}m ahead — stopping")
+                return f"Obstacle blocked approach to {target}", SkillResult.FAILURE
+
+            # ── Orient then drive (one short step per loop iteration) ─────
+            dur = min(STEP_S, remaining)
+            if abs(bearing) > ALIGN_TOL:
+                # Rotate to center the target; gentle forward motion while correcting.
+                angular_z = _bearing_to_angular_z(bearing, gain=Kp)
+                forward_scale = max(0.3, 1.0 - abs(bearing) / (math.pi / 3.0))
+                linear_x = self._planner.APPROACH_SPEED * forward_scale
+                dist_label = f"depth={depth:.2f}m" if depth is not None else f"size={size_proxy:.3f}"
+                self._feedback(
+                    f"Aligning to {target} "
+                    f"(bearing={bearing:+.2f} rad, {dist_label})"
                 )
             else:
-                estimated_dist = self._planner.CLOSE_ENOUGH_M * 3.0  # far away
+                # Heading is good — drive straight; slow down when close.
+                if depth is not None:
+                    speed_scale = min(1.0, max(0.4, (depth - CLOSE_M) / 1.0))
+                else:
+                    speed_scale = 0.7
+                linear_x = self._planner.APPROACH_SPEED * speed_scale
+                angular_z = 0.0
+                dist_label = f"depth={depth:.2f}m" if depth is not None else f"size={size_proxy:.3f}"
+                self._feedback(f"Driving to {target} ({dist_label})")
 
-            # ── THINK FAST: P-controller curved approach ──────────────────
-            # Compute initial angular correction proportional to bearing error.
-            angular_z_full = _bearing_to_angular_z(bearing, gain=Kp)
-            # Scale down forward speed when bearing is large (robot is sideways).
-            # Minimum 40% speed so robot keeps moving while correcting.
-            forward_scale = max(0.4, 1.0 - abs(bearing) / (math.pi / 3.0))
-            linear_x = self._planner.APPROACH_SPEED * forward_scale
-
-            # Cap burst to 60% of estimated remaining distance to avoid overshoot.
-            single_burst = min(
-                self._planner.APPROACH_DURATION,
-                max(0.5, estimated_dist / max(linear_x, 0.05) * 0.6),
-                remaining,
-            )
-
-            self._feedback(
-                f"Approaching {target} "
-                f"(bearing={bearing:+.2f} dist≈{estimated_dist:.1f}m)"
-            )
-
-            for i in range(DRIVE_BURSTS):
-                if self._cancelled or remaining <= 0.0:
-                    break
-                # LiDAR obstacle check before each burst.
-                fwd = _get_min_forward_m()
-                if fwd is not None and fwd < _OBSTACLE_STOP_M:
-                    self._stop()
-                    self._feedback(f"Obstacle {fwd:.2f}m ahead — stopping")
-                    return f"Obstacle blocked approach to {target}", SkillResult.FAILURE
-                # Angular correction decays: full on burst 0, 30% from burst 1 onwards.
-                # After the first corrective burst the robot should be aligned;
-                # later bursts drive mostly straight.
-                az = angular_z_full if i == 0 else angular_z_full * 0.3
-                dur = min(single_burst, remaining)
-                self.mobility.send_cmd_vel(linear_x, az, dur)
-                self._sleep(dur)
-                remaining -= dur
+            self.mobility.send_cmd_vel(linear_x, angular_z, dur)
+            self._sleep(dur)
+            remaining -= dur
 
         self._stop()
         return f"Could not reach {target}; holding position", SkillResult.FAILURE
