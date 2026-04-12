@@ -1,45 +1,233 @@
-# Innate MARS Documentation
+# RECON -- Autonomous Bomb Disposal with VLM Intelligence
 
-> Local mirror of https://docs.innate.bot — fetched 2026-04-11 for the RoboHacks hackathon.
-> MARS OS 0.4.5 · Cloud Agent 0.2.1 · Controller App 1.1.0
+> Built at [RoboHacks 2026](https://events.ycombinator.com/RoboHacks) on the [Innate MARS](https://docs.innate.bot) platform.
 
-## How to use this folder
+RECON turns a MARS robot into an autonomous bomb-disposal operator. It scouts rooms, detects threats and people using a vision-language model, evacuates civilians with voice warnings, navigates to suspicious devices, and guides an operator through wire-level defusal -- all from a real-time browser dashboard.
 
-Split by topic so you can `@`-reference just the parts you need without burning context on the whole docs site.
-For broad full-text search across everything, use `grep` in this folder or reference the monolithic `../INNATE_DOCS.md`.
+---
 
-## Files
+## Demo
 
-| File | Topic | What's inside |
-|------|-------|----------------|
-| [`01-hackathon.md`](01-hackathon.md) | **Start here** | Hackathon setup, quick start, use cases. **Read first.** _(19 KB)_ |
-| [`02-hardware.md`](02-hardware.md) | **Hardware** | MARS sensors, arm, compute, calibration, battery, connectivity, troubleshooting. _(32 KB)_ |
-| [`03-software-setup.md`](03-software-setup.md) | **Dev setup** | Software architecture, dev loop, Innate CLI, Foxglove, BASIC agent. _(30 KB)_ |
-| [`04-agents.md`](04-agents.md) | **Agents** | Agent definitions, starting agents, examples, Chess beta. _(25 KB)_ |
-| [`05-skills.md`](05-skills.md) | **Skills** | Code-defined + policy-defined skills, robot interfaces, example skills. **Core for building behaviors.** _(51 KB)_ |
-| [`06-ros2.md`](06-ros2.md) | **ROS2** | Topics, services, actions, nav/manip stacks, debugging. _(19 KB)_ |
-| [`07-training.md`](07-training.md) | **Training** | Data collection → HDF5 → ACT policy training → evaluate → deploy. **For VLA work.** _(32 KB)_ |
-| [`08-support.md`](08-support.md) | **Support** | Discord + API reference. _(0 KB)_ |
+**Dashboard (RECON UI)**
 
-## Recommended reading order for a VLA project
+The operator sees a live SLAM map, camera feed with VLM annotations, radar motion targets, and a natural-language command bar. One click starts a full autonomous mission; manual commands override at any time.
 
-1. [`01-hackathon.md`](01-hackathon.md) — get the robot on, understand the stack
-2. [`05-skills.md`](05-skills.md) — skills are what your agent invokes; focus on policy-defined + physical skill examples
-3. [`07-training.md`](07-training.md) — full train-deploy loop for ACT policies (or your own VLA)
-4. [`04-agents.md`](04-agents.md) — if you want an LLM brain orchestrating the skill
-5. [`06-ros2.md`](06-ros2.md) — only dive in when you need low-level topics/services
-6. Hardware/setup/support as needed
+```
++-------------------------------------------+---------------------------+
+|                                           |    CAMERA + VLM OVERLAY   |
+|          SLAM OCCUPANCY GRID              |   [ bbox: "bomb" 0.93 ]   |
+|          + robot pose marker              |   [ bbox: "person" 0.87 ] |
+|          + threat/person markers          |                           |
+|                                           +---------------------------+
+|                                           |     INTEL PANEL           |
++-------------------------------------------+   - Threat: device @1.2m  |
+|  COMMAND BAR                              |   - Person: civilian      |
+|  > move to the backpack                   |   - Room: office, clear   |
+|  > start mission                          +---------------------------+
+|  > say evacuate immediately               |     RADAR (LD2450)        |
++-------------------------------------------+---------------------------+
+```
 
-## External resources
+---
 
-- **Innate OS repo:** https://github.com/innate-inc/innate-os
-- **RoboHacks utils (HDF5→LeRobot converter, STEP files, APK):** https://github.com/innate-inc/robohacks-utils
-- **GraspGen reference project:** https://github.com/innate-inc/GraspGen
-- **Discord:** https://discord.com/invite/KtkyT97kc7
-- **W&B training dashboard:** https://wandb.ai/vignesh-anand/act-simple/table
-- **OpenAPI spec:** https://docs.innate.bot/api-reference/openapi.json
-- **Mintlify docs index (llms.txt):** https://docs.innate.bot/llms.txt
+## What It Does
 
-## Regenerating
+### Full Autonomous Mission (5 phases)
 
-Raw page cache is at `/tmp/innate_docs/`. Re-fetch with the Python urllib script or curl each URL in `/tmp/innate_docs/urls.txt`.
+1. **Scan** -- 360-degree room sweep, VLM classifies everything in frame
+2. **Detect** -- Gemini Flash 2.5 identifies threats (bombs, suspicious packages) and people with bounding boxes, confidence scores, and spatial layers
+3. **Evacuate** -- When people detected near a threat, TTS warns them to leave (ElevenLabs, 50+ cached phrases)
+4. **Approach** -- 3-step P-controller drives toward the threat: align bearing from VLM bbox, drive forward 1m, repeat. LiDAR stops at 30cm obstacles
+5. **Defuse** -- Arm camera feeds Gemini for wire-level analysis. Operator confirms which wire to cut. Robot executes
+
+### Manual Commands
+
+The operator can issue natural-language commands at any time:
+
+| Command | What happens |
+|---------|-------------|
+| `move to the backpack` | VLM finds target, P-controller approach |
+| `scan room` | 8-step 360-degree rotation sweep |
+| `move forward 2m` | Drive straight 2 metres |
+| `move left 0.5m` | Turn 90, drive 0.5m, turn back |
+| `say evacuate now` | TTS over robot speakers |
+| `stop` | Immediate halt, zero velocity |
+| `start mission` | Launch full autonomous FSM |
+
+---
+
+## Architecture
+
+```
+                          Gemini Flash 2.5
+                               |
+                          VLM Analysis
+                         (2 Hz cadence)
+                               |
+  Operator  ──WebSocket──>  map_stream_node.py  ──ROS2──>  MARS Robot
+  Browser       :8080        (bridge node)                   Jetson
+                               |
+                    +----------+----------+
+                    |          |          |
+               Dashboard   Command    VLM Cache
+               (HTML/JS)   Router    (/recon/vlm_annotations)
+                           |
+                    ReconMovementSkill
+                    YellowSkill (defusal)
+```
+
+### Key Components
+
+| Component | File | Lines | Purpose |
+|-----------|------|-------|---------|
+| **Bridge Node** | `slam/map_stream_node.py` | 1936 | ROS2 subscriptions + WebSocket server + HTTP dashboard |
+| **Command Router** | `slam/command_router.py` | 408 | Routes operator text to local skill execution (no cloud round-trip) |
+| **Recon Skill** | `skills/recon_movement.py` | 1024 | Movement, scanning, P-controller approach, LiDAR safety |
+| **Defusal Skill** | `skills/yellow.py` | 583 | VLM wire analysis, arm camera, defusal execution |
+| **VLM Pipeline** | `vlm/analyze.py` | 480 | Gemini API calls, prompt management, annotation parsing |
+| **Mission Planner** | `vlm/planner.py` | 324 | 8-state FSM: scan -> detect -> evacuate -> approach -> defuse |
+| **Depth Fusion** | `slam/depth_fusion.py` | 274 | Bbox-to-bearing, depth estimation, map projection |
+| **Recon Agent** | `agents/recon_agent.py` | 72 | Innate agent definition, skill routing prompt |
+| **Dashboard** | `dashboard/` | ~700 | SLAM map renderer, Intel panel, radar, command bar |
+
+### Sensor Stack
+
+| Sensor | Topic | Use |
+|--------|-------|-----|
+| Front Camera | `/mars/main_camera/left/image_raw` | VLM scene analysis |
+| LiDAR | `/scan` | Obstacle avoidance (30cm stop distance) |
+| Depth Camera | `/mars/main_camera/depth/image_rect_raw` | Distance estimation |
+| LD2450 Radar (x3) | Serial via ESP32 | Motion detection |
+| Odometry | `/odom`, `/mapping_pose` | Robot pose on SLAM map |
+| SLAM | `/map` | Occupancy grid for dashboard |
+| Arm Camera | Arm endpoint | Wire-level defusal analysis |
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Robot Platform | Innate MARS (OS 0.4.5) |
+| Robot OS | ROS 2 Humble (Jetson) |
+| Vision-Language Model | Google Gemini Flash 2.5 |
+| Text-to-Speech | ElevenLabs (turbo_v2) |
+| Local Vision | YOLOv12n (real-time overlay) |
+| Depth | VPI SGM stereo on CUDA |
+| Backend | Python 3 asyncio + websockets |
+| Frontend | Vanilla JS (no framework) |
+| Testing | pytest (39 tests) |
+
+---
+
+## Setup
+
+### Prerequisites
+
+- Innate MARS robot on same WiFi network
+- Python 3.10+
+- `GOOGLE_API_KEY` for Gemini
+- `ELEVENLABS_API_KEY` for TTS (optional)
+
+### Install
+
+```bash
+git clone https://github.com/CodCodingCode/robohacks.git
+cd robohacks
+pip install -r slam/requirements.txt
+pip install -r vlm/requirements.txt
+```
+
+### Deploy to Robot
+
+```bash
+# Copy skills to robot
+scp skills/recon_movement.py jetson1@<robot>.local:~/skills/
+scp skills/yellow.py jetson1@<robot>.local:~/skills/
+
+# Copy agent definition
+scp agents/recon_agent.py jetson1@<robot>.local:~/agents/
+```
+
+### Run Dashboard
+
+```bash
+# On the robot (SSH in first)
+source /opt/ros/humble/setup.bash
+cd ~/robohacks
+python3 slam/map_stream_node.py --host 0.0.0.0 --port 8080
+
+# On your laptop, open browser
+open http://<robot-ip>:8080/
+```
+
+---
+
+## How the P-Controller Approach Works
+
+When the operator says "move to the backpack", the system:
+
+1. **Parse** -- Command router extracts target object ("backpack") from natural language
+2. **Detect** -- VLM cache provides bounding box `[y_min, x_min, y_max, x_max]` normalized 0-1000
+3. **Bearing** -- `bbox_to_bearing()` computes horizontal angle from bbox center to image center
+4. **Align** -- If bearing > 0.10 rad dead-zone, rotate in place: `angular_z = -Kp * bearing` (Kp=0.8)
+5. **Drive** -- Move forward 1m straight at 0.15 m/s
+6. **Repeat** -- 3 steps total, checking arrival (bbox fills >35% of frame) and obstacles between each
+
+No continuous loop that accumulates drift. Each step re-reads VLM annotations for a fresh bearing.
+
+---
+
+## Project Structure
+
+```
+robohacks/
+├── agents/
+│   └── recon_agent.py          # Innate agent (skills: recon_movement, yellow)
+├── skills/
+│   ├── recon_movement.py       # Movement, scanning, approach (P-controller)
+│   └── yellow.py               # VLM navigation + defusal
+├── slam/
+│   ├── map_stream_node.py      # Core: ROS2 bridge + WebSocket + HTTP
+│   ├── command_router.py       # NL command → local skill execution
+│   ├── command_executor.py     # LLM-planned motor commands
+│   ├── depth_fusion.py         # Depth estimation + map projection
+│   └── yolo_cv_node.py         # YOLOv12 inference overlay
+├── vlm/
+│   ├── analyze.py              # Gemini VLM API
+│   ├── planner.py              # Mission FSM (8 states)
+│   └── prompts.py              # VLM prompt templates
+├── dashboard/
+│   ├── index.html              # Operator UI
+│   ├── app.js                  # State management
+│   ├── map.js                  # SLAM grid renderer
+│   ├── radar.js                # LD2450 radar panel
+│   ├── intel.js                # VLM detections panel
+│   └── actions.js              # Command handlers
+├── intruder_alert/
+│   ├── person_detector.py      # VLM person detection
+│   └── elevenlabs_tts.py       # TTS evacuation warnings
+├── tests/                      # 39 pytest tests
+└── yolo12n.pt                  # YOLOv12 nano weights
+```
+
+---
+
+## Safety Features
+
+- **LiDAR obstacle stop** -- Halts at 30cm from any obstacle in forward cone
+- **Velocity clamping** -- Max 0.20 m/s linear, 0.6 rad/s angular
+- **Command duration limits** -- No single command exceeds 5 seconds
+- **Operator override** -- `stop` / `halt` / `e-stop` immediately zeros all velocity
+- **Proximity warning** -- VLM warns when threat fills >60% of frame (~15cm away)
+- **Approach timeout** -- 90 second max per approach attempt
+
+---
+
+## Built With
+
+- [Innate MARS](https://docs.innate.bot) -- Robot platform
+- [Google Gemini Flash 2.5](https://ai.google.dev/) -- Vision-language model
+- [ROS 2 Humble](https://docs.ros.org/en/humble/) -- Robot middleware
+- [ElevenLabs](https://elevenlabs.io/) -- Text-to-speech
+- [Claude Code](https://claude.ai/claude-code) -- AI pair programming
