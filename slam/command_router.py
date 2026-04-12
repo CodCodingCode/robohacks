@@ -69,30 +69,43 @@ def route_command(text: str) -> CommandRoute:
 def _extract_approach_target(command: str) -> str:
     """Extract the core object name from approach commands.
 
-    Strips trailing qualifiers so 'move to the chair that's farther away'
-    produces 'chair', not 'chair that's farther away'.
+    Strips leading determiners and trailing qualifier clauses so
+    'move to that potted plant in front of you' → 'potted plant'
+    'move to the chair in your current field of view' → 'chair'
+    'approach the office chair on the left' → 'office chair'
     """
     import re
 
     patterns = [
-        r"^(?:move|go|navigate|drive|walk)\s+(?:to|towards?|toward)\s+(?:the\s+)?(.+)$",
-        r"^(?:approach|inspect|reach|find|locate)\s+(?:the\s+)?(.+)$",
+        r"^(?:move|go|navigate|drive|walk)\s+(?:to|towards?|toward)\s+(.+)$",
+        r"^(?:approach|inspect|reach|find|locate)\s+(.+)$",
     ]
     for pat in patterns:
         m = re.match(pat, command)
         if m:
             raw = m.group(1).strip()
-            # Strip trailing qualifier clauses: "that's ...", "on the ...", etc.
+
+            # Strip leading articles/determiners: "the", "that", "this", "a", "an"
+            raw = re.sub(r"^(?:the|that|this|those|these|a|an)\s+", "", raw)
+
+            # Strip trailing qualifier clauses at first qualifying word/phrase
             raw = re.split(
-                r"\b(?:that(?:'s|s)?\b|which\b|who\b|on\s+the\b|in\s+the\b"
-                r"|near\b|next\s+to\b|to\s+the\b|by\s+the\b|farther|further"
-                r"|closer|right|left|behind|front|across)",
+                r"\b(?:"
+                r"that(?:'s|s)?\b|which\b|who\b"
+                r"|in\s+(?:your|my|front|back|the|this)\b"
+                r"|field\s+of\b|point\s+of\s+view\b"
+                r"|on\s+the\b|by\s+the\b|next\s+to\b|near\b"
+                r"|to\s+the\b|over\s+there\b"
+                r"|farther|further|closer"
+                r"|right\b|left\b|behind\b|front\b|across\b"
+                r")",
                 raw,
                 maxsplit=1,
-            )[0].strip()
-            # Keep only the first 1-3 meaningful words (e.g. "office chair")
+            )[0].strip().strip(",")
+
+            # Keep only the first 1-3 meaningful words
             words = raw.split()
-            target = " ".join(words[:3]).strip(" ,")
+            target = " ".join(words[:3]).strip()
             if target and target not in {"area", "room", "wall", "obstacle"}:
                 return target
     return ""

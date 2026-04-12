@@ -34,7 +34,7 @@ def _try_start_scan_subscriber() -> None:
             return
 
         node = rclpy.create_node("recon_movement_scan_listener")
-        _FORWARD_ARC = math.pi / 6  # ±30° forward cone
+        _FORWARD_ARC = math.pi / 12  # ±15° narrow forward cone
 
         def _scan_cb(msg: LaserScan) -> None:
             global _min_forward_m
@@ -74,7 +74,7 @@ def _get_min_forward_m() -> float | None:
         return _min_forward_m
 
 
-_OBSTACLE_STOP_M = 0.45   # stop driving if obstacle closer than this
+_OBSTACLE_STOP_M = 0.35   # stop driving if obstacle closer than this in narrow arc
 
 
 # ---------------------------------------------------------------------------
