@@ -702,9 +702,9 @@ class ReconMovementSkill(Skill):
         """
         # --- tunables --------------------------------------------------------
         STEP_S    = 0.4    # seconds per sensor step (short = frequent re-eval)
-        ALIGN_TOL = 0.08   # rad (~4.5°) bearing dead-zone before driving
+        ALIGN_TOL = 0.20   # rad (~11.5°) — wider dead-zone so robot drives forward sooner
         CLOSE_M   = 0.35   # depth-based stop distance (metres)
-        Kp        = 1.4    # bearing → angular_z gain
+        Kp        = 1.0    # gentler gain reduces bearing overshoot oscillation
         # ---------------------------------------------------------------------
 
         remaining = max_duration
