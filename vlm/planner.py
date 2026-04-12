@@ -285,6 +285,18 @@ class MissionPlanner:
             return None
         return max(matches, key=lambda a: _bbox_area(a.get("bbox", [0, 0, 0, 0])))
 
+    @staticmethod
+    def _find_priority_target(vlm_result: dict) -> dict | None:
+        """Return the highest-priority visible annotation (threat > person)."""
+        annotations = vlm_result.get("annotations", [])
+        threats = [a for a in annotations if a.get("category") == "threat"]
+        if threats:
+            return max(threats, key=lambda a: _bbox_area(a.get("bbox", [0, 0, 0, 0])))
+        people = [a for a in annotations if a.get("category") == "person"]
+        if people:
+            return max(people, key=lambda a: _bbox_area(a.get("bbox", [0, 0, 0, 0])))
+        return None
+
     def reset(self):
         self.phase = "scanning"
         self.recon_steps_done = 0

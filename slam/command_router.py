@@ -246,10 +246,23 @@ class ReconCommandRouter:
     def _execute_approach(self, target: str) -> tuple[str, str]:
         try:
             from skills.recon_movement import ReconMovementSkill  # noqa: PLC0415
+            import skills.recon_movement as _rm                   # noqa: PLC0415
         except ImportError:
             import sys, os  # noqa: PLC0415
             sys.path.insert(0, os.path.expanduser("~/robohacks"))
             from skills.recon_movement import ReconMovementSkill  # noqa: PLC0415
+            import skills.recon_movement as _rm                   # noqa: PLC0415
+
+        # Inject the current VLM result directly into recon_movement's
+        # module-level annotation cache so the skill never tries to spin a
+        # new rclpy node (which conflicts with map_stream_node's executor).
+        try:
+            vlm_result = self._node.get_vlm_result() or {}
+            annotations = vlm_result.get("annotations", [])
+            with _rm._vlm_cache_lock:
+                _rm._vlm_cache.update({"annotations": annotations, "ts": time.time()})
+        except Exception:
+            pass
 
         skill = ReconMovementSkill(
             analyzer=lambda _img: self._node.get_vlm_result() or {},
