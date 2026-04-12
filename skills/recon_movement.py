@@ -17,6 +17,22 @@ from typing import Callable
 # a single cached forward-clearance reading.  Falls back silently when rclpy
 # or the /scan topic is unavailable.
 
+def _spin_node(node) -> None:
+    """Spin a single rclpy node with its own executor.
+
+    Using rclpy.spin() shares the process-default executor, which causes
+    'ValueError: generator already executing' when the skill runs inside
+    map_stream_node's process. A dedicated SingleThreadedExecutor avoids that.
+    """
+    try:
+        import rclpy.executors  # noqa: PLC0415
+        executor = rclpy.executors.SingleThreadedExecutor()
+        executor.add_node(node)
+        executor.spin()
+    except Exception:
+        pass
+
+
 _scan_lock = threading.Lock()
 _min_forward_m: float | None = None  # latest minimum range in forward arc
 _scan_node = None                     # rclpy node used only for this sub
@@ -57,7 +73,7 @@ def _try_start_scan_subscriber() -> None:
         node.create_subscription(LaserScan, "/scan", _scan_cb, 10)
         # Spin in a daemon thread so it doesn't block the skill executor.
         t = threading.Thread(
-            target=lambda: rclpy.spin(node),
+            target=lambda n=node: _spin_node(n),
             daemon=True,
             name="recon_scan_spin",
         )
@@ -121,7 +137,7 @@ def _try_start_vlm_cache_subscriber() -> None:
 
         node.create_subscription(String, "/recon/vlm_annotations", _cb, qos)
         t = threading.Thread(
-            target=lambda: rclpy.spin(node),
+            target=lambda n=node: _spin_node(n),
             daemon=True,
             name="recon_vlm_cache_spin",
         )
@@ -200,7 +216,7 @@ def _try_start_depth_subscriber() -> None:
         node.create_subscription(Image, _DEPTH_TOPIC, _depth_cb, 10)
         node.create_subscription(CameraInfo, _CAM_INFO_TOPIC, _cam_info_cb, 10)
         t = threading.Thread(
-            target=lambda: rclpy.spin(node),
+            target=lambda n=node: _spin_node(n),
             daemon=True,
             name="recon_depth_spin",
         )
@@ -266,7 +282,7 @@ def _try_start_approach_publisher() -> None:
         node = rclpy.create_node("recon_movement_approach_pub")
         pub = node.create_publisher(String, "/recon/approach_state", 10)
         t = threading.Thread(
-            target=lambda: rclpy.spin(node),
+            target=lambda n=node: _spin_node(n),
             daemon=True,
             name="recon_approach_pub_spin",
         )
