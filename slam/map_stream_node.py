@@ -227,7 +227,7 @@ class MapStreamNode(Node):
         self._chat_out_loop = loop
 
     def activate_agent(self, directive: str) -> None:
-        """Publish to /brain/set_directive to switch to the given agent."""
+        """Switch to the given agent directive and ensure the brain is active."""
         if self._active_directive == directive:
             return
         from std_msgs.msg import String  # noqa: PLC0415
