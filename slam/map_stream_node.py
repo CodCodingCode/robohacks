@@ -55,6 +55,7 @@ if _REPO_ROOT not in sys.path:
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.srv import GetMap
 from sensor_msgs.msg import BatteryState, CameraInfo, Image, LaserScan
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
@@ -79,8 +80,8 @@ DEFAULT_CAMERA_INFO_TOPIC = "/mars/main_camera/left/camera_info"
 
 POSE_HZ = 10.0
 MAP_HZ = 1.0
-# LiDAR fallback when /map is empty (large messages — keep slow).
-SCAN_HZ = 0.5
+# LiDAR fallback when /map is empty.
+SCAN_HZ = 1.0
 # VLM analysis cadence — Gemini rate limit is 2s minimum.
 VLM_INTERVAL = 3.0
 SEMANTIC_MARKER_TTL = 8.0
@@ -218,6 +219,16 @@ class MapStreamNode(Node):
             self.create_subscription(Image, depth_topic, self._depth_cb, 10)
         if camera_info_topic:
             self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, 10)
+
+        # Actively poll slam_toolbox for the latest map every second.
+        # The /map subscription only fires when slam_toolbox *decides* to
+        # republish (usually on change). This timer ensures we always have
+        # fresh map data even when the robot is stationary.
+        self._dynamic_map_cli = self.create_client(
+            GetMap, "/slam_toolbox/dynamic_map"
+        )
+        self._map_poll_timer = self.create_timer(1.0, self._poll_map)
+        self._map_poll_pending = False
 
         msg = (
             "map_stream_node subscribed to /pose, /odom, /mapping_pose, /map, "
@@ -381,6 +392,26 @@ class MapStreamNode(Node):
     def _map_cb(self, msg: OccupancyGrid) -> None:
         with self._lock:
             self._last_map = msg
+
+    def _poll_map(self) -> None:
+        """Timer callback: request the latest map from slam_toolbox."""
+        if self._map_poll_pending:
+            return
+        if not self._dynamic_map_cli.service_is_ready():
+            return
+        self._map_poll_pending = True
+        future = self._dynamic_map_cli.call_async(GetMap.Request())
+        future.add_done_callback(self._on_dynamic_map_response)
+
+    def _on_dynamic_map_response(self, future) -> None:
+        self._map_poll_pending = False
+        try:
+            resp = future.result()
+        except Exception:
+            return
+        if resp and resp.map and resp.map.info.width > 0:
+            with self._lock:
+                self._last_map = resp.map
 
     def _battery_cb(self, msg: BatteryState) -> None:
         if msg.percentage < 0.0:
