@@ -39,18 +39,43 @@ import asyncio
 import json
 import math
 import mimetypes
+import sys
 import threading
 import time
 from pathlib import Path
 
+# Make the `vlm` and `slam` packages importable regardless of the current
+# working directory the launcher was started from. Without this, running the
+# node from e.g. /home/jetson1 instead of /home/jetson1/robohacks causes
+# `import vlm` to fail silently and the intel panel stays blank.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
-from sensor_msgs.msg import BatteryState, Image, LaserScan
+from sensor_msgs.msg import BatteryState, CameraInfo, Image, LaserScan
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+try:
+    from slam.depth_fusion import (
+        camera_info_to_dict,
+        decode_depth_image,
+        markers_from_annotations,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - script execution fallback.
+    if exc.name != "slam":
+        raise
+    from depth_fusion import (
+        camera_info_to_dict,
+        decode_depth_image,
+        markers_from_annotations,
+    )
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
+DEFAULT_DEPTH_TOPIC = "/mars/main_camera/depth/image_rect_raw"
+DEFAULT_CAMERA_INFO_TOPIC = "/mars/main_camera/left/camera_info"
 
 POSE_HZ = 10.0
 MAP_HZ = 1.0
@@ -58,6 +83,7 @@ MAP_HZ = 1.0
 SCAN_HZ = 0.5
 # VLM analysis cadence — Gemini rate limit is 2s minimum.
 VLM_INTERVAL = 3.0
+SEMANTIC_MARKER_TTL = 8.0
 
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
@@ -67,7 +93,12 @@ def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
 class MapStreamNode(Node):
     """Tracks the latest robot pose (from whichever pose topic wins) and map."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        depth_topic: str = "",
+        camera_info_topic: str = "",
+        depth_scale: float = 0.001,
+    ) -> None:
         super().__init__("map_stream_node")
         self._lock = threading.Lock()
         # Store pose as a normalized (x, y, theta) tuple regardless of which
@@ -78,8 +109,39 @@ class MapStreamNode(Node):
         self._battery_pct: float | None = None
         # Latest compressed camera frame (bytes) for VLM analysis.
         self._last_image_bytes: bytes | None = None
+        # Encode queue: _image_cb drops raw numpy frames here; _encode_loop
+        # compresses them off the ROS spin thread so /odom and /map callbacks
+        # are never blocked by cv2.imencode().
+        import queue as _queue_mod
+        self._encode_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=1)
+        self._encode_thread = threading.Thread(
+            target=self._encode_loop, daemon=True
+        )
+        self._encode_thread.start()
+        self._last_depth_m = None
+        self._camera_info: dict | None = None
+        self._depth_scale = depth_scale
         # Latest VLM result — merged into every broadcaster payload.
         self._vlm_result: dict = {}
+        self._vlm_result_ts: float = 0.0
+        # Semantic marker cache — recomputed only when _vlm_result_ts changes.
+        self._cached_markers: list = []
+        self._cached_markers_ts: float = 0.0
+        # Autonomy: operator-controlled toggle for planner execution.
+        self._autonomy_enabled: bool = False
+        self._pending_cmd: dict = {}  # {"kind": str, "reason": str}
+        # Planner phase — synced by run_planner_thread so run_vlm_thread can
+        # switch Gemini prompts without direct access to the Planner object.
+        self._planner_phase: str = "recon"
+        # One-shot alert: set when autonomy auto-disables on "done", cleared on read.
+        self._alert: str | None = None
+
+        # /cmd_vel publisher — used by the planner thread when autonomy is on.
+        from geometry_msgs.msg import Twist  # noqa: PLC0415
+        from std_msgs.msg import String  # noqa: PLC0415
+        self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        # /defusal_action publisher — operator wire-cut / switch commands.
+        self._defusal_action_pub = self.create_publisher(String, "/defusal_action", 10)
 
         # Pose sources we accept, in order of preference. slam_toolbox's
         # /pose is the authoritative map-frame pose during mapping. Subscribe
@@ -105,11 +167,20 @@ class MapStreamNode(Node):
             self._image_cb,
             10,
         )
+        if depth_topic:
+            self.create_subscription(Image, depth_topic, self._depth_cb, 10)
+        if camera_info_topic:
+            self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, 10)
 
-        self.get_logger().info(
+        msg = (
             "map_stream_node subscribed to /pose, /odom, /mapping_pose, /map, "
             "/battery_state, /scan, /mars/main_camera/left/image_raw"
         )
+        if depth_topic:
+            msg += f", {depth_topic}"
+        if camera_info_topic:
+            msg += f", {camera_info_topic}"
+        self.get_logger().info(msg)
 
     def _store_pose(self, x: float, y: float, theta: float, source: str) -> None:
         with self._lock:
@@ -150,18 +221,53 @@ class MapStreamNode(Node):
             self._last_scan = msg
 
     def _image_cb(self, msg: Image) -> None:
+        """Drop raw frame into the encode queue — never blocks the spin thread."""
         try:
-            import cv2
             import numpy as np
             frame = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
                 msg.height, msg.width, -1
             )
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if ok:
-                with self._lock:
-                    self._last_image_bytes = buf.tobytes()
         except Exception as exc:
-            self.get_logger().warn(f"image encode failed: {exc}")
+            self.get_logger().warn(f"image reshape failed: {exc}")
+            return
+        try:
+            self._encode_queue.put_nowait(frame)
+        except Exception:
+            pass  # queue full — drop stale frame, keep latest
+
+    def _encode_loop(self) -> None:
+        """Background thread: compress frames from the encode queue to JPEG."""
+        import cv2
+        while True:
+            frame = self._encode_queue.get()
+            try:
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ok:
+                    with self._lock:
+                        self._last_image_bytes = buf.tobytes()
+            except Exception:
+                pass
+
+    def _depth_cb(self, msg: Image) -> None:
+        try:
+            depth_m = decode_depth_image(
+                bytes(msg.data),
+                msg.width,
+                msg.height,
+                msg.encoding,
+                msg.step,
+                depth_scale=self._depth_scale,
+            )
+            with self._lock:
+                self._last_depth_m = depth_m
+        except Exception as exc:
+            self.get_logger().warn(f"depth decode failed: {exc}")
+
+    def _camera_info_cb(self, msg: CameraInfo) -> None:
+        info = camera_info_to_dict(msg)
+        if info is not None:
+            with self._lock:
+                self._camera_info = info
 
     def get_image_b64(self) -> str | None:
         """Return the latest camera frame as base64, or None if no frame yet."""
@@ -174,10 +280,132 @@ class MapStreamNode(Node):
     def set_vlm_result(self, result: dict) -> None:
         with self._lock:
             self._vlm_result = result
+            self._vlm_result_ts = time.time()
 
     def get_vlm_result(self) -> dict:
         with self._lock:
             return dict(self._vlm_result)
+
+    # -- Autonomy --------------------------------------------------------
+
+    def set_autonomy(self, enabled: bool) -> None:
+        with self._lock:
+            self._autonomy_enabled = enabled
+        self.get_logger().info(f"autonomy {'ENABLED' if enabled else 'DISABLED'}")
+
+    @property
+    def autonomy_enabled(self) -> bool:
+        with self._lock:
+            return self._autonomy_enabled
+
+    def set_pending_command(self, cmd) -> None:
+        with self._lock:
+            self._pending_cmd = {"kind": cmd.kind, "reason": cmd.reason}
+
+    def get_planner_state(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": self._autonomy_enabled,
+                "cmd": dict(self._pending_cmd),
+            }
+
+    def set_planner_phase(self, phase: str) -> None:
+        with self._lock:
+            self._planner_phase = phase
+
+    def get_planner_phase(self) -> str:
+        with self._lock:
+            return self._planner_phase
+
+    def set_alert(self, msg: str) -> None:
+        with self._lock:
+            self._alert = msg
+
+    def get_and_clear_alert(self) -> str | None:
+        with self._lock:
+            msg, self._alert = self._alert, None
+            return msg
+
+    def get_depth_at_bbox(self, bbox: list) -> float | None:
+        """Return median depth in metres at the bounding box centre.
+
+        bbox uses the VLM coordinate system: [y_min, x_min, y_max, x_max] 0–1000.
+        Returns None if depth data is unavailable or the region is invalid.
+        """
+        try:
+            with self._lock:
+                depth_m = self._last_depth_m
+            if depth_m is None or depth_m.ndim != 2:
+                return None
+            h, w = depth_m.shape
+            y1 = int(bbox[0] * h / 1000)
+            x1 = int(bbox[1] * w / 1000)
+            y2 = int(bbox[2] * h / 1000)
+            x2 = int(bbox[3] * w / 1000)
+            y1, y2 = max(0, y1), min(h, y2)
+            x1, x2 = max(0, x1), min(w, x2)
+            if y2 <= y1 or x2 <= x1:
+                return None
+            region = depth_m[y1:y2, x1:x2]
+            valid = region[(region > 0.1) & (region < 10.0)]
+            return float(np.median(valid)) if valid.size > 0 else None
+        except Exception:
+            return None
+
+    def get_min_forward_range(self, arc_half_rad: float = math.pi / 6) -> float | None:
+        """Return the minimum LiDAR range in the forward arc (±arc_half_rad).
+
+        Returns None if no scan is available. The forward direction is 0 rad
+        (straight ahead in the laser frame).
+        """
+        with self._lock:
+            scan = self._last_scan
+        if scan is None:
+            return None
+        try:
+            idx_center = int(round((0.0 - scan.angle_min) / scan.angle_increment))
+            idx_half = max(1, int(arc_half_rad / scan.angle_increment))
+            idx_start = max(0, idx_center - idx_half)
+            idx_end = min(len(scan.ranges), idx_center + idx_half)
+            forward = [
+                r for r in scan.ranges[idx_start:idx_end]
+                if scan.range_min < r < scan.range_max
+            ]
+        except Exception:
+            return None
+        return min(forward) if forward else None
+
+    def publish_defusal_action(self, action: str) -> None:
+        from std_msgs.msg import String  # noqa: PLC0415
+        msg = String()
+        msg.data = action
+        self._defusal_action_pub.publish(msg)
+        self.get_logger().info(f"defusal action published: {action}")
+
+    def get_semantic_markers(self, now: float) -> list[dict]:
+        with self._lock:
+            vlm_ts = self._vlm_result_ts
+            if not vlm_ts or (now - vlm_ts) > SEMANTIC_MARKER_TTL:
+                return []
+            # Cache hit: VLM result hasn't changed since last projection.
+            if vlm_ts == self._cached_markers_ts:
+                return list(self._cached_markers)
+            annotations = self._vlm_result.get("annotations", [])
+            depth_m = self._last_depth_m
+            pose = self._pose
+            camera_info = dict(self._camera_info) if self._camera_info else None
+
+        markers = markers_from_annotations(
+            annotations,
+            depth_m,
+            pose,
+            camera_info=camera_info,
+            now=vlm_ts,
+        )
+        with self._lock:
+            self._cached_markers = markers
+            self._cached_markers_ts = vlm_ts
+        return list(markers)
 
     def snapshot(
         self,
@@ -333,6 +561,7 @@ def run_vlm_thread(node: MapStreamNode) -> None:
 
     try:
         from vlm import VLMSession
+        from vlm.analyze import analyze_frame
     except ImportError:
         print("[VLM] vlm module not found — run from repo root or add to PYTHONPATH.")
         return
@@ -347,7 +576,14 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         if image_b64 is None:
             continue
         try:
-            result = session.update(image_b64)
+            planner_phase = node.get_planner_phase()
+            if planner_phase == "approach":
+                # Bypass VLMSession: call defusal prompt directly so the
+                # defusal/wires keys are NOT stripped before reaching the dashboard.
+                result = analyze_frame(image_b64, phase="defusal")
+            else:
+                # "recon" or "done": use session for cumulative rooms tracking.
+                result = session.update(image_b64)
             node.set_vlm_result(result)
 
             if detector and tts:
@@ -391,7 +627,17 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
         clients.add(ws)
         node.get_logger().info(f"client connected ({len(clients)} total)")
         try:
-            await ws.wait_closed()
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                if msg.get("cmd") == "set_autonomy":
+                    node.set_autonomy(bool(msg.get("enabled", False)))
+                elif msg.get("cmd") == "defusal_action":
+                    action = str(msg.get("action", "")).strip()
+                    if action:
+                        node.publish_defusal_action(action)
         finally:
             clients.discard(ws)
             node.get_logger().info(f"client disconnected ({len(clients)} total)")
@@ -402,6 +648,7 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
         scan_interval = 1.0 / SCAN_HZ
         last_map_push = 0.0
         last_scan_push = 0.0
+        last_vlm_push_ts = 0.0
         while True:
             pose, occ, scan, bat = node.snapshot()
             payload: dict = {
@@ -423,10 +670,20 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 payload["slam"] = build_scan_payload(scan)
                 last_scan_push = now
 
-            # Merge latest VLM result (rooms, annotations, semantic_plan, etc.)
+            # Merge latest VLM result only when Gemini has produced a new frame.
             vlm = node.get_vlm_result()
-            if vlm:
+            with node._lock:
+                vlm_ts = node._vlm_result_ts
+            if vlm and vlm_ts > last_vlm_push_ts:
                 payload.update(vlm)
+                last_vlm_push_ts = vlm_ts
+            payload["semantic_markers"] = node.get_semantic_markers(now)
+            payload["autonomy"] = node.get_planner_state()
+            # Only consume the alert when there are clients — if no browser is
+            # connected the alert would be cleared and permanently lost.
+            alert = node.get_and_clear_alert() if clients else None
+            if alert is not None:
+                payload["alert"] = alert
 
             if clients:
                 msg = json.dumps(payload)
@@ -448,14 +705,146 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
         await broadcaster()
 
 
+_OBSTACLE_CLEARANCE_M = 0.5   # minimum forward range before blocking motion
+_LIDAR_CHECK_INTERVAL = 0.5   # re-check LiDAR every N seconds during a forward command
+
+
+def _execute_command(node: MapStreamNode, cmd: "RobotCommand") -> None:
+    """Translate a RobotCommand into /cmd_vel publishes.
+
+    Blocks for the duration of the command so the planner loop naturally
+    waits before requesting the next one.  Aborts early if autonomy is
+    disabled mid-command or a LiDAR obstacle is detected during forward motion.
+    """
+    from geometry_msgs.msg import Twist  # noqa: PLC0415
+
+    OMEGA = 0.3  # rad/s used for rotate commands
+
+    def _publish_for(twist: "Twist", duration: float) -> None:
+        is_forward = twist.linear.x > 0
+        deadline = time.time() + duration
+        last_lidar_check = 0.0
+        while time.time() < deadline:
+            if not node.autonomy_enabled:
+                break
+            # LiDAR safety: re-check the forward arc periodically.
+            now = time.time()
+            if is_forward and (now - last_lidar_check) >= _LIDAR_CHECK_INTERVAL:
+                min_range = node.get_min_forward_range()
+                if min_range is not None and min_range < _OBSTACLE_CLEARANCE_M:
+                    node.get_logger().warn(
+                        f"Obstacle {min_range:.2f}m ahead — stopping forward motion"
+                    )
+                    break
+                last_lidar_check = now
+            node._cmd_vel_pub.publish(twist)
+            time.sleep(0.05)
+        # Always send a zero-velocity stop after the command.
+        node._cmd_vel_pub.publish(Twist())
+
+    if cmd.kind == "rotate":
+        t = Twist()
+        t.angular.z = math.copysign(OMEGA, cmd.angle)
+        _publish_for(t, abs(cmd.angle) / OMEGA)
+
+    elif cmd.kind == "cmd_vel":
+        t = Twist()
+        t.linear.x = cmd.linear_x
+        t.angular.z = cmd.angular_z
+        _publish_for(t, cmd.duration)
+
+    elif cmd.kind == "wait":
+        deadline = time.time() + cmd.duration
+        while time.time() < deadline and node.autonomy_enabled:
+            time.sleep(0.1)
+
+
+def run_planner_thread(node: MapStreamNode) -> None:
+    """Background thread: call the Planner every cycle and optionally execute.
+
+    When autonomy is disabled the thread still runs — it keeps the planner
+    state live and populates ``pending_cmd`` so the dashboard can show the
+    operator what the robot *would* do next.
+    """
+    try:
+        from vlm import Planner
+    except ImportError:
+        print("[Planner] vlm module not found — planner thread disabled.")
+        return
+
+    planner = Planner()
+    print("[Planner] Planner thread started.")
+
+    while True:
+        vlm_result = node.get_vlm_result()
+
+        if not vlm_result:
+            time.sleep(1.0)
+            continue
+
+        # If Gemini has been failing, _vlm_result_ts falls behind. After two
+        # missed VLM cycles (2 × VLM_INTERVAL), strip threat signals so the
+        # planner doesn't keep chasing a threat from a stale frame.
+        with node._lock:
+            result_age = time.time() - node._vlm_result_ts
+        if result_age > VLM_INTERVAL * 2:
+            vlm_result = {**vlm_result,
+                          "threat_detected": False,
+                          "annotations": [],
+                          "defusal": {}}
+
+        if node.autonomy_enabled:
+            # Augment VLM result with live depth for the priority threat target,
+            # so the planner can use real distance instead of bbox size proxy.
+            target = planner._find_priority_target(vlm_result)
+            if target:
+                try:
+                    depth = node.get_depth_at_bbox(target["bbox"])
+                except Exception:
+                    depth = None
+                if depth is not None:
+                    vlm_result = {**vlm_result, "_threat_depth_m": depth}
+
+            # Mutate planner state and execute the command.
+            cmd = planner.next_command(vlm_result)
+            node.set_pending_command(cmd)
+            node.set_planner_phase(planner.phase)
+
+            if cmd.kind == "done":
+                node.set_autonomy(False)
+                node.set_alert(cmd.reason)
+                node.set_planner_phase("done")  # freeze VLM on defusal prompt until reset
+                planner.reset()
+                time.sleep(1.0)
+            else:
+                _execute_command(node, cmd)
+        else:
+            # Autonomy OFF: preview without mutating — counter stays frozen.
+            cmd = planner.preview_command(vlm_result)
+            node.set_pending_command(cmd)
+            # Guard: don't overwrite "done" — it was set by the done-handler and
+            # must survive until the VLM thread (3s cadence) reads it. Once the
+            # VLM thread has switched to defusal prompts it will no longer matter.
+            if node.get_planner_phase() != "done":
+                node.set_planner_phase(planner.phase)
+            time.sleep(0.2)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--depth-topic", default=DEFAULT_DEPTH_TOPIC)
+    ap.add_argument("--camera-info-topic", default=DEFAULT_CAMERA_INFO_TOPIC)
+    ap.add_argument("--depth-scale", type=float, default=0.001)
     args = ap.parse_args()
 
     rclpy.init()
-    node = MapStreamNode()
+    node = MapStreamNode(
+        depth_topic=args.depth_topic,
+        camera_info_topic=args.camera_info_topic,
+        depth_scale=args.depth_scale,
+    )
 
     # rclpy.spin in a dedicated thread so asyncio owns the main thread.
     spin_thread = threading.Thread(
@@ -468,6 +857,12 @@ def main() -> None:
         target=run_vlm_thread, args=(node,), daemon=True
     )
     vlm_thread.start()
+
+    # Planner thread — reads VLM results, executes commands when autonomy is on.
+    planner_thread = threading.Thread(
+        target=run_planner_thread, args=(node,), daemon=True
+    )
+    planner_thread.start()
 
     try:
         asyncio.run(serve(node, args.host, args.port))
