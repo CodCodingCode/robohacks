@@ -1,6 +1,8 @@
 """Safe command routing for dashboard operator text.
 
 Routes known meta-commands (stop, speak, abort, autonomy) locally.
+Approach commands are executed directly via ReconMovementSkill without
+going through the PEAS cloud agent, which is unreliable for real-time use.
 Everything else returns "fallback" so map_stream_node can forward it
 to the PEAS cloud agent via /brain/chat_in.
 """
@@ -105,6 +107,12 @@ def _extract_approach_target(command: str) -> str:
     'move to the chair in your current field of view' → 'chair'
     'approach the office chair on the left' → 'office chair'
     """
+    # Strip leading politeness phrases so "can you move to X" still matches.
+    command = re.sub(
+        r"^(?:can you|could you|please|would you|will you|hey robot|robot)[,\s]+",
+        "",
+        command,
+    )
     patterns = [
         r"^(?:move|go|navigate|drive|walk)\s+(?:to|towards?|toward)\s+(.+)$",
         r"^(?:approach|inspect|reach|find|locate)\s+(.+)$",
@@ -140,6 +148,30 @@ def _extract_approach_target(command: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Direct skill execution (no cloud round-trip)
+# ---------------------------------------------------------------------------
+
+class MapStreamMobilityAdapter:
+    """Bridges ReconMovementSkill.send_cmd_vel → node.publish_twist."""
+
+    def __init__(self, node: Any, stop_event: threading.Event) -> None:
+        self._node = node
+        self._stop_event = stop_event
+
+    def send_cmd_vel(self, linear_x: float, angular_z: float, duration: float) -> None:
+        duration = max(0.0, min(float(duration), 3.0))
+        deadline = time.time() + duration
+        while time.time() < deadline and not self._stop_event.is_set():
+            self._node.publish_twist(linear_x, angular_z)
+            time.sleep(0.1)
+        self._node.publish_twist(0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
+
 class ReconCommandRouter:
     def __init__(self, node: Any, broadcast: BroadcastFn) -> None:
         self._node = node
@@ -158,21 +190,24 @@ class ReconCommandRouter:
             await self.stop(route.text)
             return True
         if route.kind == "speak":
-            if node is not None and node.speak(route.text):
+            n = node or self._node
+            if n is not None and n.speak(route.text):
                 await self._broadcast({"phase": "done", "text": f'Speaking: "{route.text}"'})
             else:
                 await self._broadcast({"phase": "error", "text": "TTS unavailable — set ELEVENLABS_API_KEY"})
             return True
         if route.kind == "clear_map":
-            if node is not None:
-                node.clear_persistent_markers()
+            n = node or self._node
+            if n is not None:
+                n.clear_persistent_markers()
             await self._broadcast({"phase": "done", "text": route.text})
             return True
         if route.kind == "lateral_move":
             action = f"move_{route.target}"
-            if node is not None:
-                node.activate_agent("recon_agent")
-                node.publish_chat_in(
+            n = node or self._node
+            if n is not None:
+                n.activate_agent("recon_agent")
+                n.publish_chat_in(
                     "Call recon_movement skill with "
                     f"action={action} and distance_m={route.distance_m:.2f}"
                 )
@@ -184,47 +219,59 @@ class ReconCommandRouter:
             )
             return True
         if route.kind == "approach_target":
-            if node is not None:
-                # Check persistent marker store for a remembered location.
-                marker = node.find_marker_by_label(route.target)
-                if marker is not None:
-                    x, y = marker["x"], marker["y"]
-                    nav2_sent = node.navigate_to_pose(x, y)
-                    if nav2_sent:
-                        await self._broadcast({
-                            "phase": "navigating",
-                            "text": (
-                                f"→ navigating to remembered {route.target}"
-                                f" at ({x:.1f}, {y:.1f})"
-                            ),
-                        })
-                        return True
-                    # Nav2 unavailable — fall back to VLM spin-search.
-                    node.activate_agent("recon_agent")
-                    node.publish_chat_in(
-                        f"Call recon_movement skill with action=find_object"
-                        f" and target={route.target} and max_duration_s=90"
-                    )
-                    await self._broadcast({
-                        "phase": "planning",
-                        "text": (
-                            f"→ remembered {route.target} at ({x:.1f}, {y:.1f})"
-                            f" but Nav2 unavailable — searching visually"
-                        ),
-                    })
-                    return True
-
-                # No marker found — use existing VLM visual approach.
-                node.activate_agent("recon_agent")
-                node.publish_chat_in(
-                    f"Call recon_movement skill with action=approach_object and target={route.target}"
-                )
-            await self._broadcast({"phase": "planning", "text": f"→ approaching {route.target}"})
+            if self._task is not None and not self._task.done():
+                await self._broadcast({"phase": "error", "text": "busy — wait for current movement to finish"})
+                return True
+            self._stop_event.clear()
+            await self._broadcast({"phase": "executing", "text": f"→ approaching {route.target}"})
+            loop = asyncio.get_running_loop()
+            self._task = loop.create_task(self._run_approach(route.target))
             return True
         return False
 
+    async def _run_approach(self, target: str) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            message, status = await loop.run_in_executor(
+                None, self._execute_approach, target
+            )
+            if self._stop_event.is_set():
+                await self._broadcast({"phase": "idle", "text": "approach cancelled"})
+                return
+            phase = "done" if "Arrived" in message or status == "success" else "error"
+            await self._broadcast({"phase": phase, "text": message})
+        except Exception as exc:
+            await self._broadcast({"phase": "error", "text": f"approach failed: {exc}"})
+
+    def _execute_approach(self, target: str) -> tuple[str, str]:
+        try:
+            from skills.recon_movement import ReconMovementSkill  # noqa: PLC0415
+        except ImportError:
+            import sys, os  # noqa: PLC0415
+            sys.path.insert(0, os.path.expanduser("~/robohacks"))
+            from skills.recon_movement import ReconMovementSkill  # noqa: PLC0415
+
+        skill = ReconMovementSkill(
+            analyzer=lambda _img: self._node.get_vlm_result() or {},
+            sleeper=self._sleep,
+        )
+        skill.mobility = MapStreamMobilityAdapter(self._node, self._stop_event)
+        skill.image = self._node.get_image_b64()
+        return skill.execute(
+            "approach_object",
+            target=target,
+            max_duration_s=90.0,
+        )
+
+    def _sleep(self, duration: float) -> None:
+        deadline = time.time() + max(0.0, float(duration))
+        while time.time() < deadline and not self._stop_event.is_set():
+            time.sleep(min(0.1, deadline - time.time()))
+
     async def stop(self, message: str = "stop requested", silent: bool = False) -> None:
         self._stop_event.set()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
         try:
             self._node.stop_manual_motion()
         except Exception:
