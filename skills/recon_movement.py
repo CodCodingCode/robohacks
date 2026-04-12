@@ -4,8 +4,77 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 import time
 from typing import Callable
+
+
+# ---------------------------------------------------------------------------
+# LiDAR forward-clearance cache
+# ---------------------------------------------------------------------------
+# The skills_action_server runs inside a live rclpy context.  We subscribe
+# to /scan here at module load time so all ReconMovementSkill instances share
+# a single cached forward-clearance reading.  Falls back silently when rclpy
+# or the /scan topic is unavailable.
+
+_scan_lock = threading.Lock()
+_min_forward_m: float | None = None  # latest minimum range in forward arc
+_scan_node = None                     # rclpy node used only for this sub
+
+def _try_start_scan_subscriber() -> None:
+    """Create a minimal rclpy node to listen to /scan.  Idempotent."""
+    global _scan_node
+    if _scan_node is not None:
+        return
+    try:
+        import rclpy                              # noqa: PLC0415
+        from sensor_msgs.msg import LaserScan     # noqa: PLC0415
+
+        if not rclpy.ok():
+            return
+
+        node = rclpy.create_node("recon_movement_scan_listener")
+        _FORWARD_ARC = math.pi / 6  # ±30° forward cone
+
+        def _scan_cb(msg: LaserScan) -> None:
+            global _min_forward_m
+            try:
+                n = len(msg.ranges)
+                if n == 0:
+                    return
+                half = int(_FORWARD_ARC / msg.angle_increment) if msg.angle_increment > 0 else n // 12
+                center = n // 2
+                lo, hi = max(0, center - half), min(n, center + half + 1)
+                vals = [
+                    r for r in msg.ranges[lo:hi]
+                    if msg.range_min < r < msg.range_max and math.isfinite(r)
+                ]
+                with _scan_lock:
+                    _min_forward_m = min(vals) if vals else None
+            except Exception:
+                pass
+
+        node.create_subscription(LaserScan, "/scan", _scan_cb, 10)
+        # Spin in a daemon thread so it doesn't block the skill executor.
+        t = threading.Thread(
+            target=lambda: rclpy.spin(node),
+            daemon=True,
+            name="recon_scan_spin",
+        )
+        t.start()
+        _scan_node = node
+    except Exception:
+        pass  # rclpy unavailable (offline tests, etc.)
+
+
+def _get_min_forward_m() -> float | None:
+    """Return the latest minimum forward range in metres, or None."""
+    _try_start_scan_subscriber()
+    with _scan_lock:
+        return _min_forward_m
+
+
+_OBSTACLE_STOP_M = 0.45   # stop driving if obstacle closer than this
 
 from vlm.planner import Planner, RobotCommand, bbox_to_bearing
 
@@ -305,16 +374,21 @@ class ReconMovementSkill(Skill):
     ):
         """Think-fast / think-slow approach loop.
 
-        Think Slow (VLM):  call Gemini once to locate the target and get its
-                           bearing.  Repeat only after a search spin (target
-                           lost) or after completing a burst of drive steps.
-        Think Fast (drive): once the target is centred, drive forward for
-                            DRIVE_BURSTS × APPROACH_DURATION seconds with NO
-                            VLM calls — just cmd_vel.  This avoids the 3-second
-                            Gemini penalty on every single movement step.
+        Think Slow (VLM): Gemini call to locate the target, measure bearing
+            and approximate distance (via bbox size proxy).  Only called after
+            a search spin or after completing a burst of drive steps.
+
+        Think Fast (P-controller + adaptive burst):
+            • angular_z = Kp × bearing  (curves toward target while moving)
+            • forward speed scaled down when bearing is large (pointing away)
+            • burst duration capped to estimated remaining distance so the
+              robot does not overshoot
+            • angular correction decays across bursts (first burst corrects,
+              later bursts drive straighter)
         """
-        # How many consecutive forward drive steps to take between VLM calls.
-        # Each step = APPROACH_DURATION seconds at APPROACH_SPEED m/s.
+        # P-controller gain: angular_z = Kp * bearing
+        Kp = 1.4
+        # How many drive steps between VLM re-checks
         DRIVE_BURSTS = 3
 
         remaining = max_duration
@@ -324,7 +398,7 @@ class ReconMovementSkill(Skill):
                 self._stop()
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
-            # ── THINK SLOW: get a fresh perception frame ──────────────────
+            # ── THINK SLOW: fresh VLM frame ───────────────────────────────
             image_b64 = self.image
             if not image_b64:
                 self._stop()
@@ -334,7 +408,6 @@ class ReconMovementSkill(Skill):
             annotation = get_annotation(result)
 
             if annotation is None:
-                # Target not visible — spin to search, then re-VLM.
                 self._feedback(f"Searching for {target}")
                 dur = min(1.5, remaining)
                 self.mobility.send_cmd_vel(0.0, SEARCH_SPIN_SPEED_RADPS, dur)
@@ -342,7 +415,6 @@ class ReconMovementSkill(Skill):
                 remaining -= dur
                 continue
 
-            # ── Check arrival ─────────────────────────────────────────────
             bbox = annotation.get("bbox")
             if not _valid_bbox(bbox):
                 remaining -= 0.2
@@ -350,33 +422,61 @@ class ReconMovementSkill(Skill):
 
             bearing, size_proxy = bbox_to_bearing(bbox)
 
+            # ── Arrival check ─────────────────────────────────────────────
             if size_proxy >= self._planner.CLOSE_ENOUGH:
                 self._stop()
                 label = annotation.get("label", target)
                 return f"Arrived near {label}", SkillResult.SUCCESS
 
-            # ── THINK SLOW: single bearing correction ─────────────────────
-            if abs(bearing) > self._planner.BEARING_TOLERANCE:
-                angle = _clamp(bearing, -math.pi / 2.0, math.pi / 2.0)
-                rot_dur = min(abs(angle) / MAX_ANGULAR_SPEED_RADPS, MAX_COMMAND_DURATION_S)
-                angular_z = math.copysign(MAX_ANGULAR_SPEED_RADPS, angle)
-                self._feedback(f"Centering on {target} (bearing {bearing:+.2f} rad)")
-                self.mobility.send_cmd_vel(0.0, angular_z, rot_dur)
-                self._sleep(rot_dur)
-                remaining -= rot_dur
-                # Loop back immediately to re-VLM and confirm alignment
-                continue
+            # ── Adaptive burst duration from size proxy ───────────────────
+            # size_proxy ≈ CLOSE_ENOUGH at CLOSE_ENOUGH_M distance, so:
+            # estimated_dist ≈ CLOSE_ENOUGH_M × sqrt(CLOSE_ENOUGH / size_proxy)
+            if size_proxy > 0.01:
+                estimated_dist = self._planner.CLOSE_ENOUGH_M * math.sqrt(
+                    self._planner.CLOSE_ENOUGH / max(size_proxy, 0.01)
+                )
+            else:
+                estimated_dist = self._planner.CLOSE_ENOUGH_M * 3.0  # far away
 
-            # ── THINK FAST: drive forward N bursts without VLM ────────────
-            self._feedback(f"Driving toward {target} (size={size_proxy:.2f})")
-            for _ in range(DRIVE_BURSTS):
+            # ── THINK FAST: P-controller curved approach ──────────────────
+            # Compute initial angular correction proportional to bearing error.
+            angular_z_full = _clamp(
+                Kp * bearing, -MAX_ANGULAR_SPEED_RADPS, MAX_ANGULAR_SPEED_RADPS
+            )
+            # Scale down forward speed when bearing is large (robot is sideways).
+            # Minimum 40% speed so robot keeps moving while correcting.
+            forward_scale = max(0.4, 1.0 - abs(bearing) / (math.pi / 3.0))
+            linear_x = self._planner.APPROACH_SPEED * forward_scale
+
+            # Cap burst to 60% of estimated remaining distance to avoid overshoot.
+            single_burst = min(
+                self._planner.APPROACH_DURATION,
+                max(0.5, estimated_dist / max(linear_x, 0.05) * 0.6),
+                remaining,
+            )
+
+            self._feedback(
+                f"Approaching {target} "
+                f"(bearing={bearing:+.2f} dist≈{estimated_dist:.1f}m)"
+            )
+
+            for i in range(DRIVE_BURSTS):
                 if self._cancelled or remaining <= 0.0:
                     break
-                dur = min(self._planner.APPROACH_DURATION, remaining)
-                self.mobility.send_cmd_vel(self._planner.APPROACH_SPEED, 0.0, dur)
+                # LiDAR obstacle check before each burst.
+                fwd = _get_min_forward_m()
+                if fwd is not None and fwd < _OBSTACLE_STOP_M:
+                    self._stop()
+                    self._feedback(f"Obstacle {fwd:.2f}m ahead — stopping")
+                    return f"Obstacle blocked approach to {target}", SkillResult.FAILURE
+                # Angular correction decays: full on burst 0, 30% from burst 1 onwards.
+                # After the first corrective burst the robot should be aligned;
+                # later bursts drive mostly straight.
+                az = angular_z_full if i == 0 else angular_z_full * 0.3
+                dur = min(single_burst, remaining)
+                self.mobility.send_cmd_vel(linear_x, az, dur)
                 self._sleep(dur)
                 remaining -= dur
-            # After the burst, loop back to VLM to re-check bearing + arrival.
 
         self._stop()
         return f"Could not reach {target}; holding position", SkillResult.FAILURE
