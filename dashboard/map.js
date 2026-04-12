@@ -194,12 +194,8 @@
     for (let cy = minCellY; cy <= maxCellY; cy++) {
       for (let cx = minCellX; cx <= maxCellX; cx++) {
         const cell = mapData.data[cy * mapData.width + cx];
-        if (cell === -1) continue;
-        if (cell >= 50) {
-          ctx.fillStyle = "rgba(255,255,255,0.35)";
-        } else {
-          ctx.fillStyle = "rgba(255,255,255,0.05)";
-        }
+        if (cell === -1 || cell < 50) continue;
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
         const wx = ox + cx * res;
         const wy = oy + cy * res;
         const sx = toScreenX(wx, wy);
@@ -282,16 +278,6 @@
       ctx.fill();
       ctx.restore();
 
-      ctx.save();
-      ctx.fillStyle = "#888888";
-      ctx.font = "500 10px 'JetBrains Mono', monospace";
-      ctx.textAlign = "left";
-      ctx.fillText(
-        `ID:${target.id}  ${Math.round((target.confidence || 0) * 100)}%`,
-        sx + 14,
-        sy - 10,
-      );
-      ctx.restore();
     }
   }
 
@@ -311,9 +297,7 @@
   }
 
   function drawSemanticMarkers(markers) {
-    // Collect label boxes so we can spread overlapping ones.
-    const placed = []; // {lx, ly, w, h} of already-placed label boxes
-    markerHitTargets = []; // rebuild each frame
+    markerHitTargets = [];
 
     for (const marker of markers) {
       const sx = toScreenX(marker.x, marker.y);
@@ -343,60 +327,6 @@
         ctx.globalAlpha = 1;
       }
 
-      const labelText = String(marker.label || "object").slice(0, 16);
-      ctx.font = "500 10px 'JetBrains Mono', monospace";
-      const metrics = ctx.measureText(labelText);
-      const boxW = metrics.width + 12;
-      const boxH = marker.depth_m != null ? 28 : 18;
-
-      // Find a non-overlapping position for the label box.
-      let lx = sx + 7;
-      let ly = sy - 12;
-      for (let attempt = 0; attempt < 8; attempt++) {
-        let overlap = false;
-        for (const p of placed) {
-          if (
-            lx < p.lx + p.w &&
-            lx + boxW > p.lx &&
-            ly < p.ly + p.h &&
-            ly + boxH > p.ly
-          ) {
-            overlap = true;
-            break;
-          }
-        }
-        if (!overlap) break;
-        // Push the label down by boxH + 4px gap each attempt.
-        ly += boxH + 4;
-      }
-      placed.push({ lx, ly, w: boxW, h: boxH });
-
-      // Draw connector line from dot to label if label shifted.
-      if (Math.abs(ly - (sy - 12)) > 2) {
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.3;
-        ctx.lineWidth = 0.5;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(lx, ly + boxH / 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-
-      ctx.fillStyle = "rgba(10,10,10,0.85)";
-      ctx.fillRect(lx, ly, boxW, boxH);
-      ctx.strokeStyle = "rgba(255,255,255,0.07)";
-      ctx.lineWidth = 0.5;
-      ctx.strokeRect(lx, ly, boxW, boxH);
-
-      ctx.fillStyle = color;
-      ctx.textAlign = "left";
-      ctx.fillText(labelText, lx + 6, ly + 13);
-      if (marker.depth_m != null && isFinite(marker.depth_m)) {
-        ctx.fillStyle = "#444444";
-        ctx.font = "400 9px 'JetBrains Mono', monospace";
-        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, lx + 6, ly + 24);
-      }
       ctx.restore();
     }
     ctx.textAlign = "left";

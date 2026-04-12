@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+"""One-shot patcher: overwrites elevenlabs_tts.py with the fixed version."""
+import pathlib, sys
+
+target = pathlib.Path(__file__).resolve().parent / "elevenlabs_tts.py"
+
+target.write_text('''\
 """ElevenLabs text-to-speech client with disk caching.
 
 Generates audio files via the ElevenLabs API and caches them locally so
@@ -89,11 +96,7 @@ class ElevenLabsTTS:
         return cached
 
     def speak(self, text: str) -> None:
-        """Synthesize *text* and play it through the system speakers.
-
-        Tries `mpv`, then `ffplay`, then `aplay` (after converting to WAV).
-        On the Jetson (MARS), mpv is typically available.
-        """
+        """Synthesize *text* and play it through the system speakers."""
         audio_path = self.synthesize(text)
         self._play(audio_path)
 
@@ -114,9 +117,9 @@ class ElevenLabsTTS:
     def _play(path: Path) -> None:
         """Best-effort audio playback on Linux / Jetson.
 
-        Tries dedicated players first, then PulseAudio's paplay, and
-        finally falls back to converting MP3→WAV via ffmpeg and using
-        ALSA's aplay (standard on Jetson / Ubuntu).
+        Tries dedicated players first, then PulseAudio paplay, and
+        finally falls back to converting MP3 to WAV via ffmpeg and using
+        ALSA aplay (standard on Jetson / Ubuntu).
         """
         for player_cmd in [
             ["mpv", "--no-video", "--really-quiet", str(path)],
@@ -136,7 +139,7 @@ class ElevenLabsTTS:
             except (FileNotFoundError, subprocess.SubprocessError):
                 continue
 
-        # Last resort: convert MP3→WAV with ffmpeg, then play with aplay.
+        # Last resort: convert MP3 to WAV with ffmpeg, then play with aplay.
         wav_path = path.with_suffix(".wav")
         try:
             subprocess.run(
@@ -162,3 +165,7 @@ class ElevenLabsTTS:
             f"No audio player found. Install mpv, ffplay, vlc, or "
             f"ffmpeg+aplay. Audio file saved at {path}"
         )
+''')
+
+print(f"[OK] Patched {target}")
+print(f"     Size: {target.stat().st_size} bytes")
