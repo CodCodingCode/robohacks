@@ -40,11 +40,27 @@ from pathlib import Path
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
-from sensor_msgs.msg import BatteryState, Image, LaserScan
+from sensor_msgs.msg import BatteryState, CameraInfo, Image, LaserScan
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+try:
+    from slam.depth_fusion import (
+        camera_info_to_dict,
+        decode_depth_image,
+        markers_from_annotations,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - script execution fallback.
+    if exc.name != "slam":
+        raise
+    from depth_fusion import (
+        camera_info_to_dict,
+        decode_depth_image,
+        markers_from_annotations,
+    )
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
+DEFAULT_DEPTH_TOPIC = "/mars/main_camera/depth/image_rect_raw"
+DEFAULT_CAMERA_INFO_TOPIC = "/mars/main_camera/left/camera_info"
 
 POSE_HZ = 10.0
 MAP_HZ = 1.0
@@ -52,6 +68,7 @@ MAP_HZ = 1.0
 SCAN_HZ = 0.5
 # VLM analysis cadence — Gemini rate limit is 2s minimum.
 VLM_INTERVAL = 3.0
+SEMANTIC_MARKER_TTL = 8.0
 
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
@@ -61,7 +78,12 @@ def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
 class MapStreamNode(Node):
     """Tracks the latest robot pose (from whichever pose topic wins) and map."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        depth_topic: str = "",
+        camera_info_topic: str = "",
+        depth_scale: float = 0.001,
+    ) -> None:
         super().__init__("map_stream_node")
         self._lock = threading.Lock()
         # Store pose as a normalized (x, y, theta) tuple regardless of which
@@ -72,8 +94,19 @@ class MapStreamNode(Node):
         self._battery_pct: float | None = None
         # Latest compressed camera frame (bytes) for VLM analysis.
         self._last_image_bytes: bytes | None = None
+        self._last_depth_m = None
+        self._camera_info: dict | None = None
+        self._depth_scale = depth_scale
         # Latest VLM result — merged into every broadcaster payload.
         self._vlm_result: dict = {}
+        self._vlm_result_ts: float = 0.0
+        # Autonomy: operator-controlled toggle for planner execution.
+        self._autonomy_enabled: bool = False
+        self._pending_cmd: dict = {}  # {"kind": str, "reason": str}
+
+        # /cmd_vel publisher — used by the planner thread when autonomy is on.
+        from geometry_msgs.msg import Twist  # noqa: PLC0415
+        self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
         # Pose sources we accept, in order of preference. slam_toolbox's
         # /pose is the authoritative map-frame pose during mapping. Subscribe
@@ -99,11 +132,20 @@ class MapStreamNode(Node):
             self._image_cb,
             10,
         )
+        if depth_topic:
+            self.create_subscription(Image, depth_topic, self._depth_cb, 10)
+        if camera_info_topic:
+            self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, 10)
 
-        self.get_logger().info(
+        msg = (
             "map_stream_node subscribed to /pose, /odom, /mapping_pose, /map, "
             "/battery_state, /scan, /mars/main_camera/left/image_raw"
         )
+        if depth_topic:
+            msg += f", {depth_topic}"
+        if camera_info_topic:
+            msg += f", {camera_info_topic}"
+        self.get_logger().info(msg)
 
     def _store_pose(self, x: float, y: float, theta: float, source: str) -> None:
         with self._lock:
@@ -157,6 +199,27 @@ class MapStreamNode(Node):
         except Exception as exc:
             self.get_logger().warn(f"image encode failed: {exc}")
 
+    def _depth_cb(self, msg: Image) -> None:
+        try:
+            depth_m = decode_depth_image(
+                bytes(msg.data),
+                msg.width,
+                msg.height,
+                msg.encoding,
+                msg.step,
+                depth_scale=self._depth_scale,
+            )
+            with self._lock:
+                self._last_depth_m = depth_m
+        except Exception as exc:
+            self.get_logger().warn(f"depth decode failed: {exc}")
+
+    def _camera_info_cb(self, msg: CameraInfo) -> None:
+        info = camera_info_to_dict(msg)
+        if info is not None:
+            with self._lock:
+                self._camera_info = info
+
     def get_image_b64(self) -> str | None:
         """Return the latest camera frame as base64, or None if no frame yet."""
         import base64
@@ -168,10 +231,50 @@ class MapStreamNode(Node):
     def set_vlm_result(self, result: dict) -> None:
         with self._lock:
             self._vlm_result = result
+            self._vlm_result_ts = time.time()
 
     def get_vlm_result(self) -> dict:
         with self._lock:
             return dict(self._vlm_result)
+
+    # -- Autonomy --------------------------------------------------------
+
+    def set_autonomy(self, enabled: bool) -> None:
+        with self._lock:
+            self._autonomy_enabled = enabled
+        self.get_logger().info(f"autonomy {'ENABLED' if enabled else 'DISABLED'}")
+
+    @property
+    def autonomy_enabled(self) -> bool:
+        with self._lock:
+            return self._autonomy_enabled
+
+    def set_pending_command(self, cmd) -> None:
+        with self._lock:
+            self._pending_cmd = {"kind": cmd.kind, "reason": cmd.reason}
+
+    def get_planner_state(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": self._autonomy_enabled,
+                "cmd": dict(self._pending_cmd),
+            }
+
+    def get_semantic_markers(self, now: float) -> list[dict]:
+        with self._lock:
+            if not self._vlm_result_ts or (now - self._vlm_result_ts) > SEMANTIC_MARKER_TTL:
+                return []
+            annotations = self._vlm_result.get("annotations", [])
+            depth_m = self._last_depth_m
+            pose = self._pose
+            camera_info = dict(self._camera_info) if self._camera_info else None
+        return markers_from_annotations(
+            annotations,
+            depth_m,
+            pose,
+            camera_info=camera_info,
+            now=now,
+        )
 
     def snapshot(
         self,
@@ -312,7 +415,13 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
         clients.add(ws)
         node.get_logger().info(f"client connected ({len(clients)} total)")
         try:
-            await ws.wait_closed()
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                if msg.get("cmd") == "set_autonomy":
+                    node.set_autonomy(bool(msg.get("enabled", False)))
         finally:
             clients.discard(ws)
             node.get_logger().info(f"client disconnected ({len(clients)} total)")
@@ -348,6 +457,8 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
             vlm = node.get_vlm_result()
             if vlm:
                 payload.update(vlm)
+            payload["semantic_markers"] = node.get_semantic_markers(now)
+            payload["autonomy"] = node.get_planner_state()
 
             if clients:
                 msg = json.dumps(payload)
@@ -369,14 +480,92 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
         await broadcaster()
 
 
+def _execute_command(node: MapStreamNode, cmd: "RobotCommand") -> None:
+    """Translate a RobotCommand into /cmd_vel publishes.
+
+    Blocks for the duration of the command so the planner loop naturally
+    waits before requesting the next one.  Aborts early if autonomy is
+    disabled mid-command.
+    """
+    from geometry_msgs.msg import Twist  # noqa: PLC0415
+
+    OMEGA = 0.3  # rad/s used for rotate commands
+
+    def _publish_for(twist: "Twist", duration: float) -> None:
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            if not node.autonomy_enabled:
+                break
+            node._cmd_vel_pub.publish(twist)
+            time.sleep(0.05)
+        # Always send a zero-velocity stop after the command.
+        node._cmd_vel_pub.publish(Twist())
+
+    if cmd.kind == "rotate":
+        t = Twist()
+        t.angular.z = math.copysign(OMEGA, cmd.angle)
+        _publish_for(t, abs(cmd.angle) / OMEGA)
+
+    elif cmd.kind == "cmd_vel":
+        t = Twist()
+        t.linear.x = cmd.linear_x
+        t.angular.z = cmd.angular_z
+        _publish_for(t, cmd.duration)
+
+    elif cmd.kind == "wait":
+        deadline = time.time() + cmd.duration
+        while time.time() < deadline and node.autonomy_enabled:
+            time.sleep(0.1)
+
+
+def run_planner_thread(node: MapStreamNode) -> None:
+    """Background thread: call the Planner every cycle and optionally execute.
+
+    When autonomy is disabled the thread still runs — it keeps the planner
+    state live and populates ``pending_cmd`` so the dashboard can show the
+    operator what the robot *would* do next.
+    """
+    try:
+        from vlm import Planner
+    except ImportError:
+        print("[Planner] vlm module not found — planner thread disabled.")
+        return
+
+    planner = Planner()
+    print("[Planner] Planner thread started.")
+
+    while True:
+        vlm_result = node.get_vlm_result()
+
+        if not vlm_result:
+            time.sleep(1.0)
+            continue
+
+        cmd = planner.next_command(vlm_result)
+        node.set_pending_command(cmd)
+
+        if node.autonomy_enabled and cmd.kind != "done":
+            _execute_command(node, cmd)
+        else:
+            # Poll at 1 Hz when idle — fast enough to react to the toggle.
+            time.sleep(1.0)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--depth-topic", default=DEFAULT_DEPTH_TOPIC)
+    ap.add_argument("--camera-info-topic", default=DEFAULT_CAMERA_INFO_TOPIC)
+    ap.add_argument("--depth-scale", type=float, default=0.001)
     args = ap.parse_args()
 
     rclpy.init()
-    node = MapStreamNode()
+    node = MapStreamNode(
+        depth_topic=args.depth_topic,
+        camera_info_topic=args.camera_info_topic,
+        depth_scale=args.depth_scale,
+    )
 
     # rclpy.spin in a dedicated thread so asyncio owns the main thread.
     spin_thread = threading.Thread(
@@ -389,6 +578,12 @@ def main() -> None:
         target=run_vlm_thread, args=(node,), daemon=True
     )
     vlm_thread.start()
+
+    # Planner thread — reads VLM results, executes commands when autonomy is on.
+    planner_thread = threading.Thread(
+        target=run_planner_thread, args=(node,), daemon=True
+    )
+    planner_thread.start()
 
     try:
         asyncio.run(serve(node, args.host, args.port))

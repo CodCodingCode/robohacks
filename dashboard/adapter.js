@@ -133,6 +133,23 @@
     }));
   }
 
+  function normalizeSemanticMarkers(list, prev) {
+    if (!list) return prev || [];
+    if (!Array.isArray(list)) return prev || [];
+    return list
+      .filter((m) => m && m.x != null && m.y != null)
+      .map((m, i) => ({
+        id: m.id != null ? m.id : i + 1,
+        label: m.label || "object",
+        category: m.category || "object",
+        x: m.x,
+        y: m.y,
+        depth_m: m.depth_m,
+        confidence: m.confidence != null ? m.confidence : 0.5,
+        source: m.source || "vlm_depth",
+      }));
+  }
+
   function normalizeRooms(list, prev) {
     if (!list) return prev || [];
     return Array.isArray(list) ? list : prev || [];
@@ -162,11 +179,26 @@
     if (msg.radar_targets != null) {
       next.radar_targets = normalizeRadarTargets(msg.radar_targets, prev.radar_targets);
     }
+    if (msg.semantic_markers != null) {
+      next.semantic_markers = normalizeSemanticMarkers(
+        msg.semantic_markers,
+        prev.semantic_markers,
+      );
+    }
     if (msg.rooms != null) {
       next.rooms = normalizeRooms(msg.rooms, prev.rooms);
     }
     if (msg.telemetry != null) {
       next.telemetry = normalizeTelemetry(msg.telemetry, prev.telemetry);
+    }
+
+    if (msg.autonomy != null) {
+      next.autonomy = {
+        enabled: !!msg.autonomy.enabled,
+        cmd: msg.autonomy.cmd && typeof msg.autonomy.cmd === "object"
+          ? { kind: msg.autonomy.cmd.kind || "", reason: msg.autonomy.cmd.reason || "" }
+          : {},
+      };
     }
 
     if (msg.defusal != null) {
@@ -200,9 +232,11 @@
       slam: null,
       radar_targets: [],
       radar_targets_display: [],
+      semantic_markers: [],
       rooms: [],
       telemetry: [],
       defusal: cloneDefusal(EMPTY_DEFUSAL),
+      autonomy: { enabled: false, cmd: {} },
     };
   }
 

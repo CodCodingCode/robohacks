@@ -85,6 +85,8 @@
   const gripperImg = document.getElementById("gripper-feed");
   const missionBar = document.getElementById("mission-mode-bar");
 
+  const autonomyToggle = document.getElementById("autonomy-toggle");
+
   const defusalEls = {
     device: document.getElementById("defusal-device"),
     recommendation: document.getElementById("defusal-recommendation"),
@@ -153,8 +155,22 @@
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     renderSemanticPlan(state.semantic_plan);
     ReconIntel.logPlanUpdate(intelEl, state.semantic_plan);
+    renderAutonomy(state.autonomy);
     updateStatusBar(state);
     updateStalenessDom();
+  }
+
+  function renderAutonomy(autonomy) {
+    if (!autonomyToggle || !autonomy) return;
+    const enabled = !!autonomy.enabled;
+    autonomyToggle.textContent = enabled ? "ON" : "OFF";
+    autonomyToggle.classList.toggle("btn-autonomy-on", enabled);
+    autonomyToggle.classList.toggle("btn-autonomy-off", !enabled);
+    // Show pending command as a tooltip so the operator can see intent.
+    const cmd = autonomy.cmd || {};
+    autonomyToggle.title = cmd.reason
+      ? `${cmd.kind}: ${cmd.reason}`
+      : "Enable/disable autonomous planner execution";
   }
 
   const vlmPlanEl = document.getElementById("vlm-plan");
@@ -276,9 +292,16 @@
     };
 
     open();
-    return () => {
-      if (retryTimer) clearTimeout(retryTimer);
-      if (ws && ws.readyState <= 1) ws.close();
+    return {
+      stop: () => {
+        if (retryTimer) clearTimeout(retryTimer);
+        if (ws && ws.readyState <= 1) ws.close();
+      },
+      send: (data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(data));
+        }
+      },
     };
   }
 
@@ -318,19 +341,33 @@
   }
 
   let feed = null;
-  let stopWs = null;
+  let wsConn = null;
 
   // feed=same → ws://this-host/ws (map_stream_node serves HTML + /ws on one port).
   // feed=ws&ws=… → explicit bridge URL (e.g. laptop http.server → robot).
   // feed=mock or default on :8766 etc. → ReconMock.
   if (liveWs) {
-    stopWs = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
+    wsConn = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
     connectionChip.textContent = "Connecting";
     connectionChip.className = "chip chip-amber";
   } else {
     feed = ReconMock.createMockFeed(applyUpstreamMessage);
     connectionChip.textContent = "Mock";
     connectionChip.className = "chip chip-amber";
+  }
+
+  if (autonomyToggle) {
+    autonomyToggle.addEventListener("click", () => {
+      if (!wsConn) return;
+      const enabling = autonomyToggle.classList.contains("btn-autonomy-off");
+      wsConn.send({ cmd: "set_autonomy", enabled: enabling });
+      // Optimistic UI update — server will confirm on next broadcast.
+      autonomyToggle.textContent = enabling ? "ON" : "OFF";
+      autonomyToggle.classList.toggle("btn-autonomy-on", enabling);
+      autonomyToggle.classList.toggle("btn-autonomy-off", !enabling);
+    });
+    // Disable the toggle when not on a live WS feed.
+    autonomyToggle.disabled = !liveWs;
   }
 
   window.ReconDashboard = {
@@ -345,13 +382,14 @@
     }),
     stop: () => {
       if (feed && feed.stop) feed.stop();
-      if (stopWs) stopWs();
+      if (wsConn) wsConn.stop();
     },
+    sendCommand: (data) => wsConn && wsConn.send(data),
   };
 
   window.connectWebSocket = (url, onState) => {
-    if (stopWs) stopWs();
-    stopWs = connectWebSocket(url, onState || applyUpstreamMessage);
+    if (wsConn) wsConn.stop();
+    wsConn = connectWebSocket(url, onState || applyUpstreamMessage);
   };
 
   console.log(

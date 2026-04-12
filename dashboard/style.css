@@ -879,3 +879,51 @@ body.defusal-active {
   cursor: not-allowed;
   pointer-events: none;
 }
+
+.footer-autonomy {
+  align-items: center;
+}
+
+.btn-autonomy {
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--divider-strong);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.btn-autonomy-off {
+  background: transparent;
+  color: var(--secondary-text);
+  border-color: var(--divider-strong);
+}
+
+.btn-autonomy-off:hover:not(:disabled) {
+  color: var(--md-on-surface);
+  border-color: var(--md-on-surface);
+  background: var(--surface-elevated);
+}
+
+.btn-autonomy-on {
+  background: rgba(0, 200, 83, 0.12);
+  color: #00c853;
+  border-color: #00c853;
+}
+
+.btn-autonomy-on:hover:not(:disabled) {
+  background: rgba(0, 200, 83, 0.22);
+}
+
+.btn-autonomy:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  pointer-events: none;
+}
