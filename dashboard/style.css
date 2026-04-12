@@ -111,13 +111,13 @@ body {
 }
 
 .chip-amber {
-  background: rgba(98, 0, 238, 0.08);
+  background: rgba(74, 144, 217, 0.15);
   color: var(--md-primary);
 }
 
 .chip-green {
-  background: rgba(3, 218, 198, 0.12);
-  color: var(--md-secondary-variant);
+  background: rgba(3, 218, 198, 0.15);
+  color: var(--md-secondary);
 }
 
 .chip-red {
@@ -126,7 +126,7 @@ body {
 }
 
 .chip-muted {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.05);
   color: var(--hint);
   border: 1px solid var(--divider);
 }
@@ -213,7 +213,7 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(74, 69, 69, 0.9);
   border: 1px solid var(--divider);
   border-radius: var(--radius);
   padding: 10px 14px;
@@ -271,7 +271,7 @@ body {
   flex: 1;
   position: relative;
   min-height: 0;
-  background: #f5f5f5;
+  background: #3e3a3a;
   overflow: hidden;
 }
 
@@ -515,7 +515,7 @@ body {
   grid-template-rows: 1fr 1fr;
   gap: 16px;
   z-index: 5;
-  background: rgba(255, 255, 255, 0.98);
+  background: rgba(74, 69, 69, 0.98);
   padding: 16px;
   border: 1px solid var(--divider-strong);
   border-radius: var(--radius);
