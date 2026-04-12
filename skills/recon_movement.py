@@ -705,7 +705,7 @@ class ReconMovementSkill(Skill):
         STEP_S    = 0.4    # seconds per sensor step
         ALIGN_TOL = 0.08   # rad (~4.5°) — drive straight when roughly centered
         CLOSE_M   = 0.45   # depth-based stop distance (metres)
-        Kp        = 1.4    # bearing → angular_z gain (aggressive = fast correction)
+        Kp        = 0.9    # bearing → angular_z gain (was 1.4 — overcorrected/swerved)
         # ---------------------------------------------------------------------
 
         remaining = max_duration
