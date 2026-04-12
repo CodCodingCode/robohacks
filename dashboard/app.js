@@ -37,7 +37,7 @@
   if (!nocamera && !mjpegMain && mapStreamPort8080) {
     const camPort = (params.get("camera_port") || "8090").trim() || "8090";
     const camTopic = (
-      params.get("camera_topic") || "/mars/main_camera/left/image_raw"
+      params.get("camera_topic") || "/mars/main_camera/left/image_annotated"
     ).trim();
     const camProto = location.protocol === "https:" ? "https:" : "http:";
     mjpegMain = `${camProto}//${location.hostname}:${camPort}/stream?topic=${camTopic}`;
@@ -85,36 +85,23 @@
   const gripperImg = document.getElementById("gripper-feed");
   const missionBar = document.getElementById("mission-mode-bar");
 
-  const autonomyToggle = document.getElementById("autonomy-toggle");
-  const evacBanner = document.getElementById("evacuation-banner");
-  const evacCount = document.getElementById("evac-people-count");
+  const defusalEls = {
+    device: document.getElementById("defusal-device"),
+    recommendation: document.getElementById("defusal-recommendation"),
+    confidence: document.getElementById("defusal-confidence"),
+    status: document.getElementById("defusal-status"),
+    wires: document.getElementById("defusal-wires"),
+    log: document.getElementById("defusal-log"),
+  };
 
-  const defusalEls = {};
-
-  const controlsMeta = document.getElementById("controls-meta");
-  const defusalControls = document.getElementById("defusal-controls");
-
-  // Wire defusal action buttons — enabled only when defusal is active on a live feed.
-  if (defusalControls) {
-    defusalControls.querySelectorAll("[data-defusal-action]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (!wsConn) return;
-        const action = btn.dataset.defusalAction;
-        wsConn.send({ cmd: "defusal_action", action });
-        // Log the action locally so the operator sees it immediately.
-        const now = new Date();
-        const pad = (n) => String(n).padStart(2, "0");
-        const ts = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-        if (state.defusal) {
-          state.defusal.action_log = [
-            ...(state.defusal.action_log || []),
-            { time: ts, action },
-          ];
-          ReconDefusal.renderDefusal(state.defusal, defusalEls);
-        }
-      });
-    });
-  }
+  const commandsEls = {
+    form: document.getElementById("commands-form"),
+    input: document.getElementById("commands-input"),
+    send: document.getElementById("commands-send"),
+    stop: document.getElementById("commands-stop"),
+    meta: document.getElementById("commands-meta"),
+    log: document.getElementById("commands-log"),
+  };
 
   ReconMap.initMap(canvas);
 
@@ -161,68 +148,31 @@
     }
   }
 
-  function _flashAutonomyToggle() {
-    if (!autonomyToggle) return;
-    autonomyToggle.classList.add("btn-autonomy-alert");
-    setTimeout(() => autonomyToggle.classList.remove("btn-autonomy-alert"), 2000);
-  }
-
   function applyUpstreamMessage(msg) {
+    // Command-executor status frames are out-of-band — they don't flow
+    // through the main state merge (no robot/map/rooms), they just feed
+    // the Commands panel log.
+    if (msg && msg.type === "status") {
+      if (window.ReconActions && window.ReconActions.applyStatus) {
+        window.ReconActions.applyStatus(msg);
+      }
+      return;
+    }
     touchStalenessFromMessage(msg);
     const next = ReconAdapter.mergeState(state, msg);
     Object.assign(state, next);
-    // One-shot alert: fire side-effects then clear so renderAll() doesn't re-fire.
-    if (state.alert) {
-      ReconIntel.logAlert(intelEl, state.alert);
-      _flashAutonomyToggle();
-      state.alert = null;
-    }
     renderAll();
   }
 
   function renderAll() {
     ReconIntel.renderIntel(state.rooms || [], intelEl, state.radar_targets || []);
     ReconTelemetry.renderTelemetry(state.telemetry || [], telemetryEl);
+    ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
+    ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     renderSemanticPlan(state.semantic_plan);
     ReconIntel.logPlanUpdate(intelEl, state.semantic_plan);
-    renderAutonomy(state.autonomy);
-    renderEvacuationBanner(state);
     updateStatusBar(state);
     updateStalenessDom();
-  }
-
-  function renderDefusalControls(defusal) {
-    if (!defusalControls) return;
-    const active = !!(defusal && defusal.active) && liveWs;
-    defusalControls.querySelectorAll("[data-defusal-action]").forEach((btn) => {
-      btn.disabled = !active;
-    });
-    if (controlsMeta) {
-      controlsMeta.textContent = active ? "Live — send commands" : "Standby";
-      controlsMeta.style.color = active ? "var(--md-error, #ff4444)" : "";
-    }
-  }
-
-  function renderAutonomy(autonomy) {
-    if (!autonomyToggle || !autonomy) return;
-    const enabled = !!autonomy.enabled;
-    autonomyToggle.textContent = enabled ? "ON" : "OFF";
-    autonomyToggle.classList.toggle("btn-autonomy-on", enabled);
-    autonomyToggle.classList.toggle("btn-autonomy-off", !enabled);
-    const cmd = autonomy.cmd || {};
-    autonomyToggle.title = cmd.reason
-      ? `${cmd.kind}: ${cmd.reason}`
-      : "Enable/disable autonomous planner execution";
-  }
-
-  function renderEvacuationBanner(s) {
-    if (!evacBanner) return;
-    const active = !!(s.evacuation_alert);
-    evacBanner.hidden = !active;
-    document.body.classList.toggle("evacuation-active", active);
-    if (evacCount) {
-      evacCount.textContent = String(s.people_detected || 0);
-    }
   }
 
   const vlmPlanEl = document.getElementById("vlm-plan");
@@ -263,8 +213,8 @@
       btn.classList.toggle("active", btn.dataset.mode === phase);
     });
 
-    if (s.evacuation_alert) {
-      connectionChip.textContent = "ALERT";
+    if (s.defusal && s.defusal.active) {
+      connectionChip.textContent = "Defusal";
       connectionChip.className = "chip chip-red";
     } else if (liveWs) {
       if (
@@ -343,28 +293,57 @@
       }, 1000);
     };
 
-    open();
-    return {
-      stop: () => {
-        if (retryTimer) clearTimeout(retryTimer);
-        if (ws && ws.readyState <= 1) ws.close();
-      },
-      send: (data) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(data));
-        }
-      },
+    const stop = () => {
+      if (retryTimer) clearTimeout(retryTimer);
+      if (ws && ws.readyState <= 1) ws.close();
     };
+
+    // send() returns true iff the frame was actually written to an open
+    // socket. Callers use that to show an immediate error in the UI
+    // instead of silently dropping commands.
+    const send = (obj) => {
+      if (!ws || ws.readyState !== 1) return false;
+      try {
+        ws.send(JSON.stringify(obj));
+        return true;
+      } catch (e) {
+        console.warn("ws send error", e);
+        return false;
+      }
+    };
+
+    open();
+    return { stop, send };
   }
 
   function wireMjpeg(img, url, onFrame) {
+    // Retry on error instead of giving up. On a cold start the YOLO node
+    // takes ~4s to warm up, during which web_video_server has nothing to
+    // stream and closes the connection; without a retry the <img> tag is
+    // permanently dead until the user reloads the page.
     if (!img || !url) return;
     img.decoding = "async";
-    img.onload = () => onFrame();
-    img.onerror = () => {
-      img.removeAttribute("src");
+    let retryDelay = 1000;
+    const MAX_RETRY = 8000;
+    let retryTimer = null;
+    const connect = () => {
+      // Cache-bust so the browser doesn't serve us a stale 404 response.
+      const sep = url.includes("?") ? "&" : "?";
+      img.src = `${url}${sep}_cb=${Date.now()}`;
     };
-    img.src = url;
+    img.onload = () => {
+      retryDelay = 1000; // reset backoff on successful frame
+      onFrame();
+    };
+    img.onerror = () => {
+      if (retryTimer) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        retryDelay = Math.min(retryDelay * 2, MAX_RETRY);
+        connect();
+      }, retryDelay);
+    };
+    connect();
   }
 
   if (mjpegMain && cameraImg) {
@@ -393,10 +372,13 @@
   }
 
   let feed = null;
-  let wsConn = null;
+  let wsHandle = null; // {stop, send} from connectWebSocket, or null in mock mode
 
+  // feed=same → ws://this-host/ws (map_stream_node serves HTML + /ws on one port).
+  // feed=ws&ws=… → explicit bridge URL (e.g. laptop http.server → robot).
+  // feed=mock or default on :8766 etc. → ReconMock.
   if (liveWs) {
-    wsConn = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
+    wsHandle = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
     connectionChip.textContent = "Connecting";
     connectionChip.className = "chip chip-amber";
   } else {
@@ -405,24 +387,13 @@
     connectionChip.className = "chip chip-amber";
   }
 
-  if (autonomyToggle) {
-    autonomyToggle.addEventListener("click", () => {
-      const enabling = autonomyToggle.classList.contains("btn-autonomy-off");
-      if (wsConn) {
-        wsConn.send({ cmd: "set_autonomy", enabled: enabling });
-      } else if (feed && feed.setAutonomy) {
-        // Mock mode: notify the mock so it reflects the operator's toggle.
-        feed.setAutonomy(enabling);
-      } else {
-        return;
-      }
-      // Optimistic UI update — server/mock will confirm on next broadcast.
-      autonomyToggle.textContent = enabling ? "ON" : "OFF";
-      autonomyToggle.classList.toggle("btn-autonomy-on", enabling);
-      autonomyToggle.classList.toggle("btn-autonomy-off", !enabling);
-    });
-    // Enable toggle in mock mode too (mock supports setAutonomy now).
-    autonomyToggle.disabled = false;
+  // Wire the Commands panel. In mock mode we still init the panel (so the
+  // UI is consistent) but send() rejects because there's no live socket.
+  if (window.ReconActions) {
+    const sendFn = wsHandle
+      ? (obj) => wsHandle.send(obj)
+      : null;
+    window.ReconActions.init(commandsEls, sendFn);
   }
 
   window.ReconDashboard = {
@@ -437,14 +408,16 @@
     }),
     stop: () => {
       if (feed && feed.stop) feed.stop();
-      if (wsConn) wsConn.stop();
+      if (wsHandle) wsHandle.stop();
     },
-    sendCommand: (data) => wsConn && wsConn.send(data),
   };
 
   window.connectWebSocket = (url, onState) => {
-    if (wsConn) wsConn.stop();
-    wsConn = connectWebSocket(url, onState || applyUpstreamMessage);
+    if (wsHandle) wsHandle.stop();
+    wsHandle = connectWebSocket(url, onState || applyUpstreamMessage);
+    if (window.ReconActions && window.ReconActions.setSender) {
+      window.ReconActions.setSender((obj) => wsHandle.send(obj));
+    }
   };
 
   console.log(

@@ -48,10 +48,10 @@
   function renderIntel(rooms, container, radarTargets) {
     if (!container) return;
 
-    // Seed the container once.
+    // Mark the container as initialized so downstream logic that checks
+    // for the first render still behaves the same.
     if (!container.dataset.intelInit) {
       container.dataset.intelInit = "1";
-      appendEntry(container, "Intel feed active — awaiting VLM data…", "muted");
     }
 
     // Log room changes.
@@ -112,10 +112,5 @@
     );
   }
 
-  function logAlert(container, msg) {
-    if (!container || !msg) return;
-    appendEntry(container, `AUTONOMY HALTED — ${escapeHtml(msg)}`, "alert");
-  }
-
-  global.ReconIntel = { renderIntel, logPlanUpdate, logAlert };
+  global.ReconIntel = { renderIntel, logPlanUpdate };
 })(window);

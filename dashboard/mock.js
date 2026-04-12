@@ -99,8 +99,6 @@
     let defusalActive = false;
     let defusalTriggeredAt = null;
     const actionLog = [];
-    let autonomyEnabled = false;
-    let autonomyStep = 0;
 
     const pushLog = (msg) => {
       actionLog.push({ time: hhmmss(new Date()), action: msg });
@@ -115,14 +113,6 @@
 
       // Drain battery slowly.
       battery = Math.max(12, 82 - elapsed * 0.05);
-
-      // Simulate autonomy lifecycle: ON while scanning, OFF when halted at threat.
-      if (!defusalActive && elapsed > 3) {
-        autonomyEnabled = true;
-      }
-      if (defusalActive) {
-        autonomyEnabled = false;
-      }
 
       // Radar targets — 2 confirmed (people in rooms), 1 unconfirmed behind a wall.
       const radar_targets = [
@@ -252,35 +242,6 @@
         { label: "LD2450 mesh", value: "5 sensors · fused" },
       ];
 
-      // Simulate autonomy cycling through recon steps.
-      if (!defusalActive) {
-        autonomyStep = Math.floor(elapsed / 3) % 8;
-      }
-      const autonomy = {
-        enabled: autonomyEnabled,
-        cmd: defusalActive
-          ? { kind: "done", reason: "At suspicious backpack (depth=0.82m), ready for defusal" }
-          : { kind: "rotate", reason: `Recon scan step ${autonomyStep + 1}/8` },
-      };
-
-      // Semantic plan advisory from mock VLM.
-      const semantic_plan = defusalActive
-        ? { next_action: "hold for operator review", rationale: "Device in view — await operator wire-cut command", confidence: "high" }
-        : elapsed > 5
-        ? { next_action: "inspect suspicious object", rationale: "Backpack with wires detected in Office", confidence: "medium" }
-        : { next_action: "continue scanning", rationale: "No threats detected in current frame", confidence: "high" };
-
-      // Bounding box annotations (VLM detections).
-      const annotations = defusalActive
-        ? [
-            { label: "suspicious backpack", bbox: [300, 250, 750, 750], category: "threat" },
-            { label: "red wire", bbox: [380, 320, 480, 520], category: "threat" },
-          ]
-        : [
-            { label: "person", bbox: [200, 100, 700, 450], category: "person" },
-            { label: "desk", bbox: [600, 400, 900, 900], category: "object" },
-          ];
-
       const state = {
         timestamp: Math.floor(Date.now() / 1000),
         mission_phase: phase,
@@ -297,9 +258,6 @@
         rooms,
         telemetry,
         defusal,
-        autonomy,
-        semantic_plan,
-        annotations,
       };
 
       try {
@@ -319,7 +277,6 @@
     return {
       stop: () => clearInterval(id),
       pushAction,
-      setAutonomy: (val) => { autonomyEnabled = !!val; },
     };
   }
 

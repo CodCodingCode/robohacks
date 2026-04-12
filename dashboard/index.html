@@ -75,17 +75,6 @@
           </div>
           <div id="telemetry-feed" class="telemetry-feed"></div>
         </div>
-      </section>
-
-      <div id="evacuation-banner" class="evacuation-banner" hidden>
-        <div class="evacuation-icon">&#9888;</div>
-        <div class="evacuation-text">
-          <strong>PERSON DETECTED</strong>
-          <span>EVACUATION WARNING ACTIVE</span>
-        </div>
-        <div class="evacuation-count">
-          <span id="evac-people-count">0</span> person(s)
-        </div>
 
         <div class="panel panel-log">
           <div class="panel-header">
@@ -117,7 +106,38 @@
             </button>
           </div>
         </div>
+
+        <div class="panel panel-commands">
+          <div class="panel-header">
+            <span class="panel-title">Command</span>
+            <span class="panel-meta" id="commands-meta">—</span>
+          </div>
+          <ul id="commands-log" class="commands-log"></ul>
+          <form id="commands-form" class="commands-form" autocomplete="off">
+            <textarea
+              id="commands-input"
+              class="commands-input"
+              rows="2"
+              placeholder="Tell the robot what to do (Ctrl+Enter to send)…"
+            ></textarea>
+            <div class="commands-row">
+              <button type="submit" id="commands-send" class="btn">Send</button>
+              <button type="button" id="commands-stop" class="btn">Stop</button>
+            </div>
+          </form>
+        </div>
       </section>
+
+      <div id="evacuation-banner" class="evacuation-banner" hidden>
+        <div class="evacuation-icon">&#9888;</div>
+        <div class="evacuation-text">
+          <strong>PERSON DETECTED</strong>
+          <span>EVACUATION WARNING ACTIVE</span>
+        </div>
+        <div class="evacuation-count">
+          <span id="evac-people-count">0</span> person(s)
+        </div>
+      </div>
     </main>
 
     <footer class="footer-bar">
@@ -155,6 +175,7 @@
     <script src="intel.js"></script>
     <script src="telemetry.js"></script>
     <script src="defusal.js"></script>
+    <script src="actions.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

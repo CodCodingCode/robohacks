@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recon — Train</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      .train-page {
+        padding: 24px;
+        max-width: 960px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+      }
+      .train-page h2 {
+        margin: 0 0 8px 0;
+        font-size: 18px;
+        font-weight: 500;
+      }
+      .train-page p {
+        margin: 0 0 8px 0;
+        color: var(--secondary-text);
+        line-height: 1.5;
+        font-size: 14px;
+      }
+      .train-page pre {
+        background: #1e1e1e;
+        color: #e8e8e8;
+        padding: 16px;
+        border-radius: 8px;
+        overflow-x: auto;
+        font-family: "Roboto Mono", ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .train-card {
+        background: var(--md-surface);
+        border: 1px solid var(--divider);
+        border-radius: var(--radius);
+        padding: 20px;
+      }
+      .train-card + .train-card {
+        margin-top: 0;
+      }
+      .train-form {
+        display: grid;
+        grid-template-columns: 140px 1fr;
+        gap: 12px 16px;
+        align-items: center;
+      }
+      .train-form label {
+        font-size: 13px;
+        color: var(--secondary-text);
+      }
+      .train-form input,
+      .train-form select {
+        padding: 8px 10px;
+        border: 1px solid var(--divider);
+        border-radius: 6px;
+        font-family: inherit;
+        font-size: 13px;
+        background: var(--surface-elevated);
+        color: var(--primary-text);
+      }
+      .train-actions {
+        margin-top: 16px;
+        display: flex;
+        gap: 12px;
+      }
+      .btn-train {
+        background: var(--md-primary, #6200ee);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 20px;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .btn-train:hover {
+        opacity: 0.9;
+      }
+      .train-status {
+        margin-top: 12px;
+        padding: 12px;
+        background: var(--surface-elevated);
+        border-radius: 6px;
+        font-family: "Roboto Mono", monospace;
+        font-size: 12px;
+        color: var(--secondary-text);
+        white-space: pre-wrap;
+        min-height: 40px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="header-bar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-title">Recon</span>
+      </div>
+      <div class="status-cluster">
+        <a href="/" class="chip chip-muted nav-chip">← Dashboard</a>
+      </div>
+    </header>
+
+    <main class="train-page">
+      <div class="train-card">
+        <h2>YOLOv12 Training</h2>
+        <p>
+          Train a custom YOLOv12 detector on your own dataset. The
+          <code>ultralytics</code> package handles data loading, augmentation,
+          training loop, and checkpoint export. Below is the canonical recipe
+          straight from the Python API.
+        </p>
+        <pre><code>from ultralytics import YOLO
+
+# Start from a pretrained checkpoint (recommended).
+model = YOLO("yolo12n.pt")
+
+# Train on a YAML dataset spec.
+results = model.train(
+    data="coco8.yaml",   # path to your dataset YAML
+    epochs=100,
+    imgsz=640,
+    batch=16,
+    device=0,            # GPU index, "cpu", or "mps"
+)
+
+# Evaluate on the held-out val split.
+metrics = model.val()
+
+# Export to TensorRT for ~2× faster inference on Jetson.
+model.export(format="engine")</code></pre>
+      </div>
+
+      <div class="train-card">
+        <h2>Quick training launcher (placeholder)</h2>
+        <p>
+          Hook this form up to a backend endpoint that triggers
+          <code>model.train(...)</code> in a worker thread. For now it just
+          logs to the status box below — wire it up when you're ready.
+        </p>
+        <div class="train-form">
+          <label for="train-model">Base model</label>
+          <select id="train-model">
+            <option value="yolo12n.pt">yolo12n.pt (nano, fastest)</option>
+            <option value="yolo12s.pt">yolo12s.pt (small)</option>
+            <option value="yolo12m.pt">yolo12m.pt (medium)</option>
+          </select>
+
+          <label for="train-data">Dataset YAML</label>
+          <input type="text" id="train-data" value="coco8.yaml" />
+
+          <label for="train-epochs">Epochs</label>
+          <input type="number" id="train-epochs" value="100" min="1" />
+
+          <label for="train-imgsz">Image size</label>
+          <input type="number" id="train-imgsz" value="640" step="32" min="32" />
+
+          <label for="train-batch">Batch size</label>
+          <input type="number" id="train-batch" value="16" min="1" />
+        </div>
+        <div class="train-actions">
+          <button type="button" class="btn-train" id="btn-start-train">
+            Start training
+          </button>
+          <button type="button" class="btn-train" id="btn-export-engine"
+                  style="background: var(--surface-elevated); color: var(--primary-text); border: 1px solid var(--divider);">
+            Export TensorRT engine
+          </button>
+        </div>
+        <div class="train-status" id="train-status">
+          Idle. (Form is wired client-side only — implement /train/start on the server to actually kick training.)
+        </div>
+      </div>
+    </main>
+
+    <script>
+      (function () {
+        const status = document.getElementById("train-status");
+        const fmt = (obj) => JSON.stringify(obj, null, 2);
+        const collect = () => ({
+          model: document.getElementById("train-model").value,
+          data: document.getElementById("train-data").value,
+          epochs: parseInt(document.getElementById("train-epochs").value, 10),
+          imgsz: parseInt(document.getElementById("train-imgsz").value, 10),
+          batch: parseInt(document.getElementById("train-batch").value, 10),
+        });
+        document.getElementById("btn-start-train").addEventListener("click", () => {
+          const cfg = collect();
+          status.textContent =
+            "Would POST to /train/start with:\n" + fmt(cfg) +
+            "\n\n(Backend not implemented yet — wire up a route in map_stream_node.py that spawns a worker thread calling YOLO(model).train(**cfg).)";
+        });
+        document.getElementById("btn-export-engine").addEventListener("click", () => {
+          const cfg = collect();
+          status.textContent =
+            "Would POST to /train/export with:\n" + fmt({ model: cfg.model, format: "engine" }) +
+            "\n\n(Backend not implemented yet.)";
+        });
+      })();
+    </script>
+  </body>
+</html>

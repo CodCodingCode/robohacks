@@ -55,28 +55,20 @@
 
     if (els.wires) {
       els.wires.innerHTML = "";
-      const wires = defusal.wires || [];
-      if (wires.length === 0) {
-        const placeholder = document.createElement("div");
-        placeholder.className = "wire-row wire-row-pending";
-        placeholder.textContent = "Approaching device — wire analysis pending";
-        els.wires.appendChild(placeholder);
-      } else {
-        for (const wire of wires) {
-          const row = document.createElement("div");
-          row.className = "wire-row";
-          const colorClass = normalizeColor(wire.color);
-          row.innerHTML = `
-                      <span class="wire-swatch ${colorClass}"></span>
-                      <span class="wire-connection">${escapeHtml(
-                        wire.color ? wire.color.toUpperCase() : "?",
-                      )} → ${escapeHtml(wire.connection || "unknown")}</span>
-                      <span class="wire-risk ${escapeHtml(wire.risk || "low")}">${escapeHtml(
-                        (wire.risk || "low").toUpperCase(),
-                      )}</span>
-                  `;
-          els.wires.appendChild(row);
-        }
+      for (const wire of defusal.wires || []) {
+        const row = document.createElement("div");
+        row.className = "wire-row";
+        const colorClass = normalizeColor(wire.color);
+        row.innerHTML = `
+                    <span class="wire-swatch ${colorClass}"></span>
+                    <span class="wire-connection">${escapeHtml(
+                      wire.color ? wire.color.toUpperCase() : "?",
+                    )} → ${escapeHtml(wire.connection || "unknown")}</span>
+                    <span class="wire-risk ${escapeHtml(wire.risk || "low")}">${escapeHtml(
+                      (wire.risk || "low").toUpperCase(),
+                    )}</span>
+                `;
+        els.wires.appendChild(row);
       }
     }
 

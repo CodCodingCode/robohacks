@@ -126,6 +126,7 @@ class MapStreamNode(Node):
         self._planner_phase: str = "recon"
         # One-shot alert: set when autonomy auto-disables on "done", cleared on read.
         self._alert: str | None = None
+        self._manual_motion_token: int = 0
 
         # /cmd_vel publisher — used by the planner thread when autonomy is on.
         from geometry_msgs.msg import Twist  # noqa: PLC0415
@@ -372,6 +373,125 @@ class MapStreamNode(Node):
         msg.data = action
         self._defusal_action_pub.publish(msg)
         self.get_logger().info(f"defusal action published: {action}")
+
+    def handle_operator_command(self, text: str) -> tuple[str, bool]:
+        command = " ".join(text.lower().replace("_", " ").split())
+        if not command:
+            return "No command entered", True
+
+        if command in {"autonomy on", "enable autonomy", "auto on"}:
+            self.set_autonomy(True)
+            return "Autonomy enabled", False
+        if command in {"autonomy off", "disable autonomy", "auto off"}:
+            self.set_autonomy(False)
+            return "Autonomy disabled", False
+        if command in {"stop", "halt", "emergency stop", "e stop", "estop"}:
+            self.set_autonomy(False)
+            self.stop_manual_motion()
+            return "Stopped motion and disabled autonomy", False
+
+        defusal_actions = {
+            "abort": "ABORT",
+            "cut red": "CUT_RED",
+            "red": "CUT_RED",
+            "cut blue": "CUT_BLUE",
+            "blue": "CUT_BLUE",
+            "cut green": "CUT_GREEN",
+            "green": "CUT_GREEN",
+            "flip switch": "FLIP_SWITCH",
+            "switch": "FLIP_SWITCH",
+        }
+        action = defusal_actions.get(command)
+        if action:
+            self.publish_defusal_action(action)
+            return f"Published defusal action {action}", False
+
+        motion = self._parse_manual_motion(command)
+        if motion is not None:
+            label, linear_x, angular_z, duration = motion
+            self.set_autonomy(False)
+            self.start_manual_motion(linear_x, angular_z, duration)
+            return f"Manual motion: {label} for {duration:.1f}s; autonomy disabled", False
+
+        return (
+            "Unknown command. Try: forward, back, left, right, stop, "
+            "autonomy on/off, cut red/blue/green, flip switch, abort",
+            True,
+        )
+
+    def _parse_manual_motion(self, command: str) -> tuple[str, float, float, float] | None:
+        tokens = command.split()
+        duration = 0.7
+        for token in tokens:
+            try:
+                duration = max(0.1, min(float(token), 1.5))
+                break
+            except ValueError:
+                continue
+
+        if any(word in tokens for word in ("forward", "ahead")):
+            return "forward", 0.08, 0.0, duration
+        if any(word in tokens for word in ("back", "backward", "reverse")):
+            return "back", -0.06, 0.0, duration
+        if "left" in tokens:
+            return "left", 0.0, 0.35, duration
+        if "right" in tokens:
+            return "right", 0.0, -0.35, duration
+        return None
+
+    def _next_manual_motion_token(self) -> int:
+        with self._lock:
+            self._manual_motion_token += 1
+            return self._manual_motion_token
+
+    def _manual_motion_is_current(self, token: int) -> bool:
+        with self._lock:
+            return self._manual_motion_token == token
+
+    def start_manual_motion(self, linear_x: float, angular_z: float, duration: float) -> None:
+        token = self._next_manual_motion_token()
+        thread = threading.Thread(
+            target=self._run_manual_motion,
+            args=(token, linear_x, angular_z, duration),
+            daemon=True,
+        )
+        thread.start()
+
+    def stop_manual_motion(self) -> None:
+        self._next_manual_motion_token()
+        from geometry_msgs.msg import Twist  # noqa: PLC0415
+        self._cmd_vel_pub.publish(Twist())
+
+    def _run_manual_motion(
+        self,
+        token: int,
+        linear_x: float,
+        angular_z: float,
+        duration: float,
+    ) -> None:
+        from geometry_msgs.msg import Twist  # noqa: PLC0415
+
+        twist = Twist()
+        twist.linear.x = linear_x
+        twist.angular.z = angular_z
+        is_forward = linear_x > 0
+        deadline = time.time() + duration
+        last_lidar_check = 0.0
+        try:
+            while time.time() < deadline and self._manual_motion_is_current(token):
+                now = time.time()
+                if is_forward and (now - last_lidar_check) >= _LIDAR_CHECK_INTERVAL:
+                    min_range = self.get_min_forward_range()
+                    if min_range is not None and min_range < _OBSTACLE_CLEARANCE_M:
+                        self.get_logger().warn(
+                            f"Obstacle {min_range:.2f}m ahead — stopping manual motion"
+                        )
+                        break
+                    last_lidar_check = now
+                self._cmd_vel_pub.publish(twist)
+                time.sleep(0.05)
+        finally:
+            self._cmd_vel_pub.publish(Twist())
 
     def get_semantic_markers(self, now: float) -> list[dict]:
         with self._lock:
@@ -629,6 +749,16 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                     action = str(msg.get("action", "")).strip()
                     if action:
                         node.publish_defusal_action(action)
+                elif msg.get("cmd") == "operator_command":
+                    text = str(msg.get("text", "")).strip()
+                    status, is_error = node.handle_operator_command(text)
+                    await ws.send(json.dumps({
+                        "operator_command": {
+                            "text": text,
+                            "status": status,
+                            "error": is_error,
+                        }
+                    }))
         finally:
             clients.discard(ws)
             node.get_logger().info(f"client disconnected ({len(clients)} total)")
