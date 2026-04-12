@@ -58,9 +58,18 @@
       }
       if (hit) {
         const m = hit.marker;
-        const depthSrc = m.source === "vlm_depth" ? "measured" : "assumed";
+        const depthSrc =
+          m.source === "vlm_depth"
+            ? "measured"
+            : m.source === "vlm_bbox_estimated"
+              ? "estimated"
+              : "assumed";
         const depthClass =
-          m.source === "vlm_depth" ? "tt-depth-measured" : "tt-depth-assumed";
+          m.source === "vlm_depth"
+            ? "tt-depth-measured"
+            : m.source === "vlm_bbox_estimated"
+              ? "tt-depth-measured"
+              : "tt-depth-assumed";
         const depthStr =
           m.depth_m != null && isFinite(m.depth_m)
             ? `<span class="${depthClass}">${Number(m.depth_m).toFixed(2)}m (${depthSrc})</span>`

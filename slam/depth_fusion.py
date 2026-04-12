@@ -26,6 +26,39 @@ def assumed_depth_for_category(category: str) -> float:
     return ASSUMED_DEPTH_M.get(str(category or "object").lower(), 2.0)
 
 
+# Per-category reference: (area_frac at reference_depth, reference_depth_m).
+# Tuned for OAK-D 150° diagonal FOV (~120° horizontal).
+_BBOX_DEPTH_REF: dict[str, tuple[float, float]] = {
+    "person": (0.15, 2.0),
+    "threat": (0.08, 1.5),
+    "door": (0.20, 2.5),
+    "furniture": (0.12, 2.0),
+    "object": (0.08, 1.5),
+    "window": (0.10, 3.0),
+}
+
+
+def estimate_depth_from_bbox(
+    bbox: list | None,
+    category: str,
+) -> tuple[float, str]:
+    """Estimate depth from bbox size using inverse-sqrt pinhole model.
+
+    Returns (depth_m, source_tag).  Falls back to flat assumed depth when
+    the bbox is missing or has zero area.
+    """
+    if bbox and _valid_bbox(bbox):
+        y0, x0, y1, x1 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+        area_frac = ((y1 - y0) * (x1 - x0)) / 1_000_000.0
+        if area_frac > 1e-4:  # avoid div-by-zero on tiny detections
+            cat = str(category or "object").lower()
+            ref_frac, ref_depth = _BBOX_DEPTH_REF.get(cat, (0.08, 1.5))
+            depth = ref_depth * math.sqrt(ref_frac / area_frac)
+            depth = max(0.3, min(depth, MAX_DEPTH_M))
+            return depth, "vlm_bbox_estimated"
+    return assumed_depth_for_category(category), "vlm_assumed"
+
+
 def stable_marker_id(label: str, x: float, y: float, cell_size: float = 1.0) -> str:
     """Stable string ID for an object at world position (x, y).
 
@@ -159,8 +192,7 @@ def marker_from_annotation(
         image_width = int((camera_info or {}).get("width") or 1000)
 
     if depth is None:
-        depth = assumed_depth_for_category(category)
-        source = "vlm_assumed"
+        depth, source = estimate_depth_from_bbox(bbox, category)
 
     bearing = bbox_bearing_rad(bbox, image_width, camera_info)
     if bearing is None:

@@ -133,8 +133,8 @@ class MapStreamNode(Node):
         # Semantic marker cache — recomputed only when _vlm_result_ts changes.
         self._cached_markers: list = []
         self._cached_markers_ts: float = 0.0
-        # Persistent object store — accumulates VLM detections across frames.
-        # Keyed by stable_marker_id(); never auto-expires. Reset via clear_persistent_markers().
+        # Persistent object store — accumulates VLM detections for the session.
+        # Keyed by stable_marker_id(). Lives in memory, cleared on restart.
         self._persistent_markers: dict[str, dict] = {}
         # One-time diagnostic flags so we only log missing topics once.
         self._warned_no_map: bool = False
@@ -354,15 +354,8 @@ class MapStreamNode(Node):
                 existing["source"] = m.get("source", existing.get("source"))
             # Always update observation timestamp for TTL expiry.
             self._persistent_markers[mid]["ts"] = time.time()
-
     def get_persistent_markers(self) -> list[dict]:
-        now = time.time()
         with self._lock:
-            # Expire markers older than 5 minutes.
-            stale = [k for k, v in self._persistent_markers.items()
-                     if now - v.get("ts", 0) > 300]
-            for k in stale:
-                del self._persistent_markers[k]
             return list(self._persistent_markers.values())
 
     def find_marker_by_label(self, target: str) -> dict | None:
@@ -411,14 +404,35 @@ class MapStreamNode(Node):
             goal.pose.pose.orientation.z = math.sin(theta / 2.0)
             goal.pose.pose.orientation.w = math.cos(theta / 2.0)
 
-            self._nav2_client.send_goal_async(goal)
+            future = self._nav2_client.send_goal_async(goal)
             self.get_logger().info(
-                f"Nav2 goal sent: ({x:.2f}, {y:.2f}, θ={math.degrees(theta):.0f}°)"
+                f"[NAV2] goal sent: ({x:.2f}, {y:.2f}, θ={math.degrees(theta):.0f}°)"
             )
+            future.add_done_callback(self._on_nav2_goal_response)
             return True
         except Exception as e:
             self.get_logger().warn(f"Nav2 goal failed: {e}")
             return False
+
+    def _on_nav2_goal_response(self, future) -> None:
+        try:
+            goal_handle = future.result()
+        except Exception as e:
+            self.get_logger().error(f"[NAV2] goal send FAILED: {e}")
+            return
+        if not goal_handle.accepted:
+            self.get_logger().warn("[NAV2] goal REJECTED by Nav2")
+            return
+        self.get_logger().info("[NAV2] goal ACCEPTED — robot should be moving")
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_nav2_result)
+
+    def _on_nav2_result(self, future) -> None:
+        try:
+            result = future.result()
+            self.get_logger().info(f"[NAV2] navigation finished, status={result.status}")
+        except Exception as e:
+            self.get_logger().warn(f"[NAV2] navigation result error: {e}")
 
     def clear_persistent_markers(self) -> None:
         with self._lock:
