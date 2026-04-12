@@ -346,13 +346,17 @@ class ReconMovementSkill(Skill):
         success_message: str,
     ):
         remaining = min(duration_s, MAX_APPROACH_DURATION_S)
+        any_motion = False
         while remaining > 0.0:
             if self._cancelled:
                 self._stop()
                 return "Movement cancelled", SkillResult.CANCELLED
             chunk = min(remaining, MAX_COMMAND_DURATION_S)
-            self.mobility.send_cmd_vel(linear_x, angular_z, chunk)
-            self._sleep(chunk)
+            moved = self.mobility.send_cmd_vel(linear_x, angular_z, chunk)
+            if not moved:
+                self._stop()
+                return "Obstacle too close — cannot move forward", SkillResult.FAILURE
+            any_motion = True
             remaining -= chunk
         self._stop()
         return success_message, SkillResult.SUCCESS

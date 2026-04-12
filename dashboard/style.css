@@ -255,13 +255,15 @@ body {
 /* ---------- Right column ---------- */
 
 .right-column {
-  display: grid;
-  grid-template-rows:
-    minmax(160px, 1fr)
-    minmax(120px, 0.9fr)
-    minmax(72px, 0.42fr)
-    minmax(180px, 0.9fr);
+  display: flex;
+  flex-direction: column;
   gap: 16px;
+  min-height: 0;
+}
+
+.right-column .panel {
+  width: 100%;
+  flex: 1 1 0;
   min-height: 0;
 }
 
@@ -531,14 +533,6 @@ body {
 .panel-threat {
   grid-column: 2;
   grid-row: 1;
-}
-.panel-log {
-  grid-column: 1;
-  grid-row: 2;
-}
-.panel-controls {
-  grid-column: 2;
-  grid-row: 2;
 }
 
 .readonly-banner {

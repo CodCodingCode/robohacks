@@ -26,15 +26,6 @@ STOP_COMMANDS = {"stop", "halt", "emergency stop", "e stop", "estop", "hold", "p
 AUTONOMY_ENABLE_COMMANDS = {"autonomy on", "enable autonomy", "auto on"}
 AUTONOMY_DISABLE_COMMANDS = {"autonomy off", "disable autonomy", "auto off"}
 
-DEFUSAL_BLOCK_PATTERNS = (
-    "cut",
-    "clip",
-    "sever",
-    "flip switch",
-    "switch",
-    "defuse",
-    "disarm",
-)
 
 
 @dataclass(frozen=True)
@@ -71,11 +62,6 @@ def route_command(text: str) -> CommandRoute:
         return CommandRoute("stop", "Autonomy already disabled; holding position")
     if command == "abort":
         return CommandRoute("stop", "Abort received; holding position")
-    if _is_defusal_manipulation(command):
-        return CommandRoute(
-            "error",
-            "Defusal manipulation is not available; use wire inspection/localization only",
-        )
     if _is_scan(command):
         return CommandRoute("skill", "Scanning area", SkillRoute("scan_room"))
     if _is_forward(command):
@@ -116,15 +102,19 @@ class MapStreamMobilityAdapter:
         speed = math.copysign(MAX_ANGULAR_SPEED_RADPS, angle)
         self.send_cmd_vel(0.0, speed, abs(angle) / MAX_ANGULAR_SPEED_RADPS)
 
-    def send_cmd_vel(self, linear_x: float, angular_z: float, duration: float) -> None:
+    def send_cmd_vel(self, linear_x: float, angular_z: float, duration: float) -> bool:
+        """Publish cmd_vel for `duration` seconds. Returns True if motion was published."""
         duration = max(0.0, min(float(duration), 2.0))
         deadline = time.time() + duration
+        published = False
         while time.time() < deadline and not self._stop_event.is_set():
             if linear_x > 0 and _blocked_ahead(self._node):
                 break
             self._node.publish_twist(linear_x, angular_z)
+            published = True
             time.sleep(0.1)
         self._node.publish_twist(0.0, 0.0)
+        return published
 
 
 class ReconCommandRouter:
@@ -149,7 +139,7 @@ class ReconCommandRouter:
             return True
         return False
 
-    async def stop(self, message: str = "stop requested") -> None:
+    async def stop(self, message: str = "stop requested", silent: bool = False) -> None:
         self._stop_event.set()
         try:
             self._node.stop_manual_motion()
@@ -159,7 +149,8 @@ class ReconCommandRouter:
             self._node.publish_twist(0.0, 0.0)
         except Exception:
             pass
-        await self._broadcast({"phase": "idle", "text": message})
+        if not silent:
+            await self._broadcast({"phase": "idle", "text": message})
 
     async def _start_skill(self, route: CommandRoute) -> None:
         if self._task is not None and not self._task.done():
@@ -200,12 +191,6 @@ class ReconCommandRouter:
         deadline = time.time() + max(0.0, float(duration))
         while time.time() < deadline and not self._stop_event.is_set():
             time.sleep(min(0.1, deadline - time.time()))
-
-
-def _is_defusal_manipulation(command: str) -> bool:
-    if command in {"red", "blue", "green", "cut red", "cut blue", "cut green"}:
-        return True
-    return any(pattern in command for pattern in DEFUSAL_BLOCK_PATTERNS)
 
 
 def _is_scan(command: str) -> bool:

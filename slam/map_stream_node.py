@@ -415,28 +415,6 @@ class MapStreamNode(Node):
             self.stop_manual_motion()
             return "Stopped motion and disabled autonomy", False
 
-        defusal_actions = {
-            "abort": "ABORT",
-            "cut red": "CUT_RED",
-            "red": "CUT_RED",
-            "cut blue": "CUT_BLUE",
-            "blue": "CUT_BLUE",
-            "cut green": "CUT_GREEN",
-            "green": "CUT_GREEN",
-            "flip switch": "FLIP_SWITCH",
-            "switch": "FLIP_SWITCH",
-        }
-        action = defusal_actions.get(command)
-        if action:
-            if action == "ABORT":
-                self.set_autonomy(False)
-                self.stop_manual_motion()
-                return "Abort received; holding position", False
-            return (
-                "Defusal manipulation is not available; use wire inspection/localization only",
-                True,
-            )
-
         motion = self._parse_manual_motion(command)
         if motion is not None:
             label, linear_x, angular_z, duration = motion
@@ -809,20 +787,6 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                             "phase": "error",
                             "text": "Autonomous switching is disabled; use manual commands",
                         }))
-                elif msg.get("cmd") == "defusal_action":
-                    action = str(msg.get("action", "")).strip()
-                    if action:
-                        if action == "ABORT":
-                            node.set_autonomy(False)
-                            node.stop_manual_motion()
-                            await command_router.stop("Abort received; holding position")
-                            await command_executor.stop()
-                        else:
-                            await ws.send(json.dumps({
-                                "type": "status",
-                                "phase": "error",
-                                "text": "Defusal manipulation is not available; use wire inspection/localization only",
-                            }))
                 elif msg.get("cmd") == "operator_command":
                     text = str(msg.get("text", "")).strip()
                     if await command_router.handle(text):
