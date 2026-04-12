@@ -614,8 +614,23 @@ class MapStreamNode(Node):
             True,
         )
 
+    # Words that signal a conditional or goal-directed command — let these
+    # fall through to the brain rather than executing as a fixed-duration move.
+    _CONDITIONAL_WORDS: frozenset = frozenset({
+        "until", "while", "when", "unless", "keep", "continue",
+        "see", "find", "spot", "detect", "notice", "reach",
+    })
+
     def _parse_manual_motion(self, command: str) -> tuple[str, float, float, float] | None:
         tokens = command.split()
+
+        # Goal-directed or conditional commands belong to the brain.
+        if any(w in tokens for w in self._CONDITIONAL_WORDS):
+            return None
+        # More than 4 tokens is almost certainly natural language, not a simple move.
+        if len(tokens) > 4:
+            return None
+
         duration = _MANUAL_DEFAULT_DURATION_S
         for token in tokens:
             try:

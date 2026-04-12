@@ -76,6 +76,8 @@ SUPPORTED_ACTIONS = {
     "approach_object",
     "hold",
     "reset_recon",
+    "rotate",       # turn by angle: distance_m = degrees (+ left/CCW, - right/CW)
+    "find_object",  # spin until target found, then approach
 }
 
 MAX_FORWARD_SPEED_MPS = 0.20
@@ -152,6 +154,12 @@ class ReconMovementSkill(Skill):
             return self._move_forward(distance_m, max_duration_s)
         if action == "approach_object":
             return self._approach_object(target, max_duration_s)
+        if action == "rotate":
+            # distance_m is repurposed as degrees; positive = left/CCW, negative = right/CW
+            degrees = _coerce_float(distance_m, default=90.0)
+            return self._rotate_by(math.radians(degrees))
+        if action == "find_object":
+            return self._find_and_approach(target, max_duration_s)
         return self._approach_detected_threat(max_duration_s)
 
     def cancel(self):
@@ -218,6 +226,76 @@ class ReconMovementSkill(Skill):
                 result.get("annotations", []), target
             ),
         )
+
+    def _rotate_by(self, angle_rad: float):
+        """Rotate in place by the given angle (radians). + = CCW/left, - = CW/right."""
+        self._require_mobility()
+        angle_rad = _clamp(angle_rad, -2.0 * math.pi, 2.0 * math.pi)
+        if abs(angle_rad) < 1e-3:
+            return "No rotation needed", SkillResult.SUCCESS
+        duration = min(abs(angle_rad) / MAX_ANGULAR_SPEED_RADPS, MAX_APPROACH_DURATION_S)
+        angular_z = math.copysign(MAX_ANGULAR_SPEED_RADPS, angle_rad)
+        self.mobility.send_cmd_vel(0.0, angular_z, duration)
+        self._sleep(duration)
+        self._stop()
+        deg = math.degrees(angle_rad)
+        return f"Rotated {deg:+.0f}°", SkillResult.SUCCESS
+
+    def _find_and_approach(self, target: str, max_duration_s: float):
+        """Spin until the target is visible via VLM, then approach it.
+
+        Uses the think-fast/think-slow loop once the object is found.
+        Calls VLM every ~2s during the search spin.
+        """
+        self._require_mobility()
+        target = str(target or "").strip()
+        if not target:
+            return "find_object requires a target", SkillResult.FAILURE
+
+        max_duration = min(
+            _clamp_duration(max_duration_s, default=60.0),
+            MAX_APPROACH_DURATION_S,
+        )
+        remaining = max_duration
+
+        # How long to spin between VLM checks during the search phase.
+        SEARCH_STEP_S = 1.5
+
+        self._feedback(f"Searching for {target}…")
+
+        while remaining > 0.0:
+            if self._cancelled:
+                self._stop()
+                return f"Search for {target} cancelled", SkillResult.CANCELLED
+
+            # Think Slow: check if target is visible.
+            image_b64 = self.image
+            if not image_b64:
+                self._stop()
+                return f"No camera frame available to search for {target}", SkillResult.FAILURE
+
+            result = self._analyze_frame(image_b64)
+            annotation = _find_target_annotation(result.get("annotations", []), target)
+
+            if annotation is not None:
+                self._feedback(f"Found {target} — approaching")
+                # Hand off to the full think-fast/think-slow approach.
+                return self._approach_with_think_fast_slow(
+                    target=target,
+                    max_duration=remaining,
+                    get_annotation=lambda r: _find_target_annotation(
+                        r.get("annotations", []), target
+                    ),
+                )
+
+            # Not found yet — spin and try again.
+            spin_dur = min(SEARCH_STEP_S, remaining)
+            self.mobility.send_cmd_vel(0.0, SEARCH_SPIN_SPEED_RADPS, spin_dur)
+            self._sleep(spin_dur)
+            remaining -= spin_dur
+
+        self._stop()
+        return f"Could not find {target} after full search", SkillResult.FAILURE
 
     def _approach_with_think_fast_slow(
         self,

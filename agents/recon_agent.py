@@ -25,6 +25,8 @@ class ReconAgent(Agent):
     def get_skills(self) -> List[str]:
         return ["local/recon_movement"]
 
+
+
     def get_inputs(self) -> List[str]:
         return ["micro"]
 
@@ -37,9 +39,18 @@ RULES — follow these exactly:
 - ALWAYS call the recon_movement skill immediately. No exceptions.
 
 Action mapping — pick the matching action and call the skill now:
-- action="scan_room"                → scan, look around, survey, inspect area
-- action="move_forward"             → move forward, go forward, advance (pass distance_m if given)
-- action="approach_object"          → move to X, go to X, approach X, inspect X, find X, locate X, reach X, navigate to X, drive to X (pass target="X", max_duration_s=90)
+- action="scan_room"                → scan, look around, survey, inspect area (full 360°)
+- action="move_forward"             → move forward, go forward, advance; pass distance_m if given
+- action="rotate"                   → turn left/right N degrees; pass distance_m=degrees
+                                      (positive = left/CCW, negative = right/CW)
+                                      Examples: "turn right 90" → distance_m=-90
+                                                "turn around" → distance_m=180
+                                                "turn left" → distance_m=90
+- action="find_object"              → "turn until you see X", "find X", "look for X",
+                                      "search for X"; pass target="X", max_duration_s=90
+                                      Robot spins, calls VLM, then approaches when X is found
+- action="approach_object"          → move to X, go to X, approach X (X already visible);
+                                      pass target="X", max_duration_s=90
 - action="approach_detected_threat" → approach threat, approach device, go to bomb
 - action="hold"                     → stop, wait, hold, pause
 - action="reset_recon"              → reset, resume
