@@ -201,6 +201,20 @@
       };
     }
 
+    // semantic_plan: advisory from Gemini, display-only.
+    if (msg.semantic_plan != null && typeof msg.semantic_plan === "object") {
+      next.semantic_plan = {
+        next_action: String(msg.semantic_plan.next_action || ""),
+        rationale: String(msg.semantic_plan.rationale || ""),
+        confidence: String(msg.semantic_plan.confidence || "low"),
+      };
+    }
+
+    // One-shot alert — only set when present; app.js clears it after consuming.
+    if (msg.alert != null) {
+      next.alert = String(msg.alert);
+    }
+
     if (msg.defusal != null) {
       next.defusal = cloneDefusal({
         ...EMPTY_DEFUSAL,
@@ -237,6 +251,8 @@
       telemetry: [],
       defusal: cloneDefusal(EMPTY_DEFUSAL),
       autonomy: { enabled: false, cmd: {} },
+      semantic_plan: null,
+      alert: null,
     };
   }
 

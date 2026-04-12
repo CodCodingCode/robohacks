@@ -91,6 +91,31 @@
 
   const defusalEls = {};
 
+  const controlsMeta = document.getElementById("controls-meta");
+  const defusalControls = document.getElementById("defusal-controls");
+
+  // Wire defusal action buttons — enabled only when defusal is active on a live feed.
+  if (defusalControls) {
+    defusalControls.querySelectorAll("[data-defusal-action]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (!wsConn) return;
+        const action = btn.dataset.defusalAction;
+        wsConn.send({ cmd: "defusal_action", action });
+        // Log the action locally so the operator sees it immediately.
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, "0");
+        const ts = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        if (state.defusal) {
+          state.defusal.action_log = [
+            ...(state.defusal.action_log || []),
+            { time: ts, action },
+          ];
+          ReconDefusal.renderDefusal(state.defusal, defusalEls);
+        }
+      });
+    });
+  }
+
   ReconMap.initMap(canvas);
 
   function ageLabel(ts) {
@@ -136,10 +161,22 @@
     }
   }
 
+  function _flashAutonomyToggle() {
+    if (!autonomyToggle) return;
+    autonomyToggle.classList.add("btn-autonomy-alert");
+    setTimeout(() => autonomyToggle.classList.remove("btn-autonomy-alert"), 2000);
+  }
+
   function applyUpstreamMessage(msg) {
     touchStalenessFromMessage(msg);
     const next = ReconAdapter.mergeState(state, msg);
     Object.assign(state, next);
+    // One-shot alert: fire side-effects then clear so renderAll() doesn't re-fire.
+    if (state.alert) {
+      ReconIntel.logAlert(intelEl, state.alert);
+      _flashAutonomyToggle();
+      state.alert = null;
+    }
     renderAll();
   }
 
@@ -152,6 +189,18 @@
     renderEvacuationBanner(state);
     updateStatusBar(state);
     updateStalenessDom();
+  }
+
+  function renderDefusalControls(defusal) {
+    if (!defusalControls) return;
+    const active = !!(defusal && defusal.active) && liveWs;
+    defusalControls.querySelectorAll("[data-defusal-action]").forEach((btn) => {
+      btn.disabled = !active;
+    });
+    if (controlsMeta) {
+      controlsMeta.textContent = active ? "Live — send commands" : "Standby";
+      controlsMeta.style.color = active ? "var(--md-error, #ff4444)" : "";
+    }
   }
 
   function renderAutonomy(autonomy) {
@@ -358,14 +407,22 @@
 
   if (autonomyToggle) {
     autonomyToggle.addEventListener("click", () => {
-      if (!wsConn) return;
       const enabling = autonomyToggle.classList.contains("btn-autonomy-off");
-      wsConn.send({ cmd: "set_autonomy", enabled: enabling });
+      if (wsConn) {
+        wsConn.send({ cmd: "set_autonomy", enabled: enabling });
+      } else if (feed && feed.setAutonomy) {
+        // Mock mode: notify the mock so it reflects the operator's toggle.
+        feed.setAutonomy(enabling);
+      } else {
+        return;
+      }
+      // Optimistic UI update — server/mock will confirm on next broadcast.
       autonomyToggle.textContent = enabling ? "ON" : "OFF";
       autonomyToggle.classList.toggle("btn-autonomy-on", enabling);
       autonomyToggle.classList.toggle("btn-autonomy-off", !enabling);
     });
-    autonomyToggle.disabled = !liveWs;
+    // Enable toggle in mock mode too (mock supports setAutonomy now).
+    autonomyToggle.disabled = false;
   }
 
   window.ReconDashboard = {

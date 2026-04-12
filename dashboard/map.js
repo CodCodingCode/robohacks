@@ -4,7 +4,7 @@
  * Layers (drawn in order, bottom to top):
  *   1. SLAM (occupancy grid OR raw lidar-scan fallback)
  *   2. Radar blips
- *   3. VLM room labels & threat markers
+ *   3. Depth-projected semantic markers and VLM room labels
  *   4. Robot triangle
  *
  * World → screen: world is metres with +y pointing up.
@@ -18,6 +18,12 @@
   let dpr = 1;
   let cssW = 0;
   let cssH = 0;
+
+  // Offscreen canvas cache for the occupancy grid. Re-rasterized only when
+  // map data or viewport scale changes; otherwise blitted with one drawImage.
+  let _mapOffscreen = null;
+  let _mapOffscreenKey = null;
+  let _mapOffscreenOrigin = null; // {wx, wy} world coords of the top-left corner
 
   const viewport = {
     scale: 40, // pixels per metre
@@ -44,6 +50,8 @@
     // Recompute scale to fit ~12m across the shorter axis.
     const minDim = Math.min(cssW, cssH);
     viewport.scale = minDim / 12;
+    // Invalidate offscreen cache — scale changed so cell pixel size changed.
+    _mapOffscreenKey = null;
   }
 
   function toScreenX(wx) {
@@ -78,6 +86,7 @@
     }
 
     drawRoomLabels(state.rooms || []);
+    drawSemanticMarkers(state.semantic_markers || []);
     drawRadarBlips(
       state.radar_targets_display || state.radar_targets || [],
     );
@@ -128,39 +137,42 @@
     const oy = mapData.origin ? mapData.origin.y : 0;
     const cellPx = res * viewport.scale;
 
-    // Coarse culling: only draw cells whose world rect intersects viewport.
-    const viewMinWX = viewport.centerWX - cssW / (2 * viewport.scale);
-    const viewMaxWX = viewport.centerWX + cssW / (2 * viewport.scale);
-    const viewMinWY = viewport.centerWY - cssH / (2 * viewport.scale);
-    const viewMaxWY = viewport.centerWY + cssH / (2 * viewport.scale);
+    // Cache key: data length + map dimensions + scale. The data array is
+    // replaced wholesale when the server sends a new map, so length change
+    // reliably signals new content. Scale change requires a re-rasterize
+    // because cell pixel size changes.
+    const cacheKey = `${mapData.data.length}_${mapData.width}_${mapData.height}_${viewport.scale.toFixed(2)}`;
 
-    const minCellX = Math.max(0, Math.floor((viewMinWX - ox) / res));
-    const maxCellX = Math.min(
-      mapData.width - 1,
-      Math.ceil((viewMaxWX - ox) / res),
-    );
-    const minCellY = Math.max(0, Math.floor((viewMinWY - oy) / res));
-    const maxCellY = Math.min(
-      mapData.height - 1,
-      Math.ceil((viewMaxWY - oy) / res),
-    );
-
-    for (let cy = minCellY; cy <= maxCellY; cy++) {
-      for (let cx = minCellX; cx <= maxCellX; cx++) {
-        const cell = mapData.data[cy * mapData.width + cx];
-        if (cell === -1) continue; // unknown: leave background showing
-        if (cell >= 50) {
-          ctx.fillStyle = "#e0e0e0";
-        } else {
-          ctx.fillStyle = "#ffffff";
+    if (_mapOffscreenKey !== cacheKey || !_mapOffscreen) {
+      // Re-rasterize the entire map to an offscreen canvas.
+      const ow = Math.max(1, Math.ceil(mapData.width * cellPx));
+      const oh = Math.max(1, Math.ceil(mapData.height * cellPx));
+      _mapOffscreen = new OffscreenCanvas(ow, oh);
+      const offCtx = _mapOffscreen.getContext("2d");
+      offCtx.clearRect(0, 0, ow, oh);
+      for (let cy = 0; cy < mapData.height; cy++) {
+        for (let cx = 0; cx < mapData.width; cx++) {
+          const cell = mapData.data[cy * mapData.width + cx];
+          if (cell === -1) continue; // unknown — leave transparent
+          offCtx.fillStyle = cell >= 50 ? "#e0e0e0" : "#ffffff";
+          // Flip Y: world +y is up, canvas +y is down.
+          offCtx.fillRect(
+            cx * cellPx,
+            (mapData.height - 1 - cy) * cellPx,
+            Math.ceil(cellPx) + 1,
+            Math.ceil(cellPx) + 1,
+          );
         }
-        const wx = ox + cx * res;
-        const wy = oy + cy * res;
-        const sx = toScreenX(wx);
-        const sy = toScreenY(wy + res); // top-left on screen (flipped Y)
-        ctx.fillRect(sx, sy, Math.ceil(cellPx) + 1, Math.ceil(cellPx) + 1);
       }
+      _mapOffscreenKey = cacheKey;
+      _mapOffscreenOrigin = {
+        wx: ox,
+        wy: oy + mapData.height * res, // top-left world coord (flipped)
+      };
     }
+
+    // Blit: one drawImage call instead of thousands of fillRect calls.
+    ctx.drawImage(_mapOffscreen, toScreenX(_mapOffscreenOrigin.wx), toScreenY(_mapOffscreenOrigin.wy));
   }
 
   /* --------------- SLAM: raw lidar scan fallback --------------- */
@@ -221,6 +233,36 @@
   }
 
   /* --------------- VLM room labels --------------- */
+
+  function drawSemanticMarkers(markers) {
+    for (const marker of markers) {
+      const sx = toScreenX(marker.x);
+      const sy = toScreenY(marker.y);
+      const isThreat = marker.category === "threat";
+
+      ctx.save();
+      ctx.fillStyle = isThreat ? "#b00020" : "#018786";
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(0,0,0,0.78)";
+      ctx.fillRect(sx + 9, sy - 15, 112, 28);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "500 11px Roboto, system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(String(marker.label || "object").slice(0, 16), sx + 14, sy - 3);
+      if (marker.depth_m != null && isFinite(marker.depth_m)) {
+        ctx.font = "400 10px Roboto, system-ui, sans-serif";
+        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, sx + 14, sy + 10);
+      }
+      ctx.restore();
+    }
+    ctx.textAlign = "left";
+  }
 
   function drawRoomLabels(rooms) {
     for (const room of rooms) {

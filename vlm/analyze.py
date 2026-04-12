@@ -131,8 +131,13 @@ class VLMSession:
         self.frame_count: int = 0
 
     def update(self, image_b64: str) -> dict:
-        """Analyze a frame, always in recon mode. No phase switching."""
-        result = analyze_frame(image_b64, phase="recon")
+        """Analyze a frame using the current phase, update internal state.
+
+        Phase switching is controlled externally (by the planner thread via
+        MapStreamNode.set_planner_phase) — this method never auto-switches.
+        Returns the full dashboard-ready state dict.
+        """
+        result = analyze_frame(image_b64, phase=self.phase)
         self.frame_count += 1
 
         for room in result.get("rooms", []):
@@ -157,6 +162,8 @@ class VLMSession:
         return result
 
     def reset(self):
+        """Reset to recon mode (e.g. after threat is cleared)."""
+        self.phase = "recon"
         self.rooms_seen.clear()
         self.frame_count = 0
 

@@ -86,7 +86,38 @@
         <div class="evacuation-count">
           <span id="evac-people-count">0</span> person(s)
         </div>
-      </div>
+
+        <div class="panel panel-log">
+          <div class="panel-header">
+            <span class="panel-title">Log</span>
+          </div>
+          <ul id="defusal-log" class="action-log"></ul>
+        </div>
+
+        <div class="panel panel-controls">
+          <div class="panel-header">
+            <span class="panel-title">Controls</span>
+            <span class="panel-meta" id="controls-meta">Standby</span>
+          </div>
+          <div class="control-grid" id="defusal-controls">
+            <button type="button" class="btn btn-red" disabled data-defusal-action="CUT_RED">
+              Cut red
+            </button>
+            <button type="button" class="btn btn-blue" disabled data-defusal-action="CUT_BLUE">
+              Cut blue
+            </button>
+            <button type="button" class="btn btn-green" disabled data-defusal-action="CUT_GREEN">
+              Cut green
+            </button>
+            <button type="button" class="btn btn-amber" disabled data-defusal-action="FLIP_SWITCH">
+              Flip switch
+            </button>
+            <button type="button" class="btn btn-abort" disabled data-defusal-action="ABORT">
+              Abort
+            </button>
+          </div>
+        </div>
+      </section>
     </main>
 
     <footer class="footer-bar">

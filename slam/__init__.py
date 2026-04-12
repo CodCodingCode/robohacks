@@ -8,6 +8,14 @@ it as JSON over ws://0.0.0.0:8000/ws in the shape expected by
 See slam/README.md for the runbook.
 """
 
-from .map_stream_skill import MapStreamSkill
+from __future__ import annotations
 
 __all__ = ["MapStreamSkill"]
+
+
+def __getattr__(name: str):
+    if name == "MapStreamSkill":
+        from .map_stream_skill import MapStreamSkill
+
+        return MapStreamSkill
+    raise AttributeError(f"module 'slam' has no attribute {name!r}")

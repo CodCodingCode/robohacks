@@ -112,5 +112,10 @@
     );
   }
 
-  global.ReconIntel = { renderIntel, logPlanUpdate };
+  function logAlert(container, msg) {
+    if (!container || !msg) return;
+    appendEntry(container, `AUTONOMY HALTED — ${escapeHtml(msg)}`, "alert");
+  }
+
+  global.ReconIntel = { renderIntel, logPlanUpdate, logAlert };
 })(window);

@@ -360,6 +360,7 @@ body {
 .intel-entry.intel-clear  { border-left-color: var(--md-secondary-variant, #00c853); }
 .intel-entry.intel-threat { border-left-color: var(--md-error, #ff4444); color: var(--md-error, #ff4444); }
 .intel-entry.intel-plan   { border-left-color: var(--md-primary, #00aaff); opacity: 0.85; }
+.intel-entry.intel-alert  { border-left-color: #ff4444; color: #ff4444; font-weight: 700; }
 .intel-entry.intel-radar  { border-left-color: var(--amber, #ffaa00); opacity: 0.75; }
 .intel-entry.intel-muted  { opacity: 0.4; font-style: italic; }
 .intel-entry.intel-info   { border-left-color: transparent; }
@@ -867,7 +868,6 @@ body.defusal-active {
   pointer-events: none;
 }
 
-<<<<<<< Updated upstream
 .footer-autonomy {
   align-items: center;
 }
@@ -914,6 +914,15 @@ body.defusal-active {
   opacity: 0.38;
   cursor: not-allowed;
   pointer-events: none;
+}
+
+@keyframes autonomy-alert-flash {
+  0%, 100% { background: rgba(255, 68, 68, 0.35); border-color: #ff4444; color: #ff4444; }
+  50%       { background: rgba(255, 68, 68, 0.10); }
+}
+
+.btn-autonomy.btn-autonomy-alert {
+  animation: autonomy-alert-flash 0.5s ease-in-out 4;
 }
 
 /* ── Evacuation Banner ─────────────────────────────────────── */

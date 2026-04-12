@@ -197,10 +197,6 @@ class MapStreamSkill(Skill):
                 payload: dict = {
                     "timestamp": time.time(),
                     "mission_phase": "recon",
-                    "_debug": {
-                        "odom_type": type(self.odom).__name__,
-                        "map_type": type(self.map_data).__name__,
-                    },
                 }
 
                 # --- pose (every tick) -------------------------------------
