@@ -2,6 +2,11 @@
 # Map + dashboard + WebSocket (8080) and optional web_video_server (8090).
 # Prerequisites: same shell has already sourced ROS + workspace; cd to repo root.
 #   SKIP_VIDEO=1 ./slam/run_live_dashboard.sh   — map only
+#
+# Intruder alerts: set ELEVENLABS_API_KEY (+ GEMINI_API_KEY) to auto-warn
+# detected people via ElevenLabs TTS through the robot speakers.
+#   export ELEVENLABS_API_KEY=sk-...
+#   ./slam/run_live_dashboard.sh
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

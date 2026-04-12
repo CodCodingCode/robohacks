@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Standalone SLAM → dashboard WebSocket bridge.
+"""Standalone SLAM → dashboard WebSocket bridge with intruder alerts.
 
 Runs as a plain ROS2 Python node (NOT a brain_client Skill). Subscribes
 directly to /odom and /map and streams JSON frames over a WebSocket.
+
+Intruder alert: when ELEVENLABS_API_KEY is set alongside GEMINI_API_KEY,
+the VLM thread automatically detects people in camera frames and plays
+a spoken warning through the robot speakers via the ElevenLabs TTS API.
 
 Why standalone instead of the MapStreamSkill approach: the brain_client
 skills_action_server runs on a single-threaded rclpy executor, so during
@@ -12,6 +16,8 @@ executor doesn't have that problem.
 
 Usage (on the Jetson, after sourcing ROS + workspace):
 
+    export GEMINI_API_KEY=your-gemini-key
+    export ELEVENLABS_API_KEY=your-elevenlabs-key   # enables intruder alerts
     python3 slam/map_stream_node.py --host 0.0.0.0 --port 8080
 
 Then open http://<robot-ip>:8080/ — static dashboard + WebSocket JSON on /ws.
@@ -348,11 +354,80 @@ def _serve_static(request_path: str):
     return 200, ctype or "application/octet-stream", target.read_bytes()
 
 
+def _init_intruder_alert():
+    """Try to set up ElevenLabs TTS + person detection for intruder alerts.
+
+    Returns (PersonDetector, ElevenLabsTTS) or (None, None) if deps are
+    missing or ELEVENLABS_API_KEY is not set.
+    """
+    import os
+    try:
+        from intruder_alert.person_detector import PersonDetector
+        from intruder_alert.elevenlabs_tts import ElevenLabsTTS
+    except ImportError:
+        print("[ALERT] intruder_alert module not found — alerts disabled.")
+        return None, None
+
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        print("[ALERT] ELEVENLABS_API_KEY not set — intruder alerts disabled.")
+        return None, None
+
+    detector = PersonDetector(cooldown_seconds=15.0)
+    tts = ElevenLabsTTS()
+
+    # Pre-cache the default warning so the first alert plays instantly.
+    try:
+        tts.synthesize(
+            "Attention. This is an emergency. A potential explosive device "
+            "has been detected in this area. For your safety, evacuate the "
+            "building immediately. Move away from the area calmly and quickly. "
+            "Do not touch any suspicious objects. Emergency services have been "
+            "contacted. Please proceed to the nearest exit now."
+        )
+        print("[ALERT] Evacuation alert system armed — audio pre-cached.")
+    except Exception as exc:
+        print(f"[ALERT] Failed to pre-cache audio: {exc}")
+
+    return detector, tts
+
+
+def _handle_intruder_alert(
+    vlm_result: dict,
+    detector,
+    tts,
+) -> None:
+    """Check VLM result for people and play an audio warning if found."""
+    people = detector.extract_people(vlm_result)
+    if not people:
+        return
+
+    if not detector.should_alert():
+        return
+
+    closest = max(people, key=lambda p: p.bbox_area)
+    print(
+        f"[ALERT] Person detected: {closest.label} "
+        f"(size={closest.size_proxy:.3f}) — issuing evacuation warning"
+    )
+    detector.mark_alerted()
+
+    tts.speak_async(
+        "Attention. This is an emergency. A potential explosive device "
+        "has been detected in this area. For your safety, evacuate the "
+        "building immediately. Move away from the area calmly and quickly. "
+        "Do not touch any suspicious objects. Emergency services have been "
+        "contacted. Please proceed to the nearest exit now."
+    )
+
+
 def run_vlm_thread(node: MapStreamNode) -> None:
     """Background thread: grab camera frames and call Gemini every VLM_INTERVAL seconds.
 
     Results are stored on the node and merged into the next broadcaster payload.
     Requires GEMINI_API_KEY to be set in the environment.
+
+    When ELEVENLABS_API_KEY is also set, automatically plays an audio
+    warning through the robot speakers whenever a person is detected.
     """
     import os
     if not os.environ.get("GEMINI_API_KEY"):
@@ -366,6 +441,7 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         return
 
     session = VLMSession()
+    detector, tts = _init_intruder_alert()
     print("[VLM] VLM thread started.")
 
     while True:
@@ -376,6 +452,9 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         try:
             result = session.update(image_b64)
             node.set_vlm_result(result)
+
+            if detector and tts:
+                _handle_intruder_alert(result, detector, tts)
         except Exception as exc:
             print(f"[VLM] analysis error: {exc}")
 

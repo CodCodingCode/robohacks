@@ -113,8 +113,8 @@ def ask_operator_question(image_b64: str, question: str) -> str:
 class VLMSession:
     """Wraps analyze_frame() with cross-frame state tracking.
 
-    Tracks mission phase, cumulative room list, and threat history so the
-    skill loop doesn't have to manage VLM state itself.
+    Always stays in recon phase — no mode switching.  Threats are logged
+    in the result but never trigger a defusal phase change.
 
     Usage in a skill:
 
@@ -125,45 +125,38 @@ class VLMSession:
             broadcast(payload)
     """
 
-    # Require this many consecutive threat detections before switching to defusal.
-    THREAT_CONFIRM_COUNT = 3
-
     def __init__(self):
         self.phase: str = "recon"
         self.rooms_seen: dict[str, dict] = {}
-        self.threat_active: bool = False
         self.frame_count: int = 0
-        self._consecutive_threats: int = 0
 
     def update(self, image_b64: str) -> dict:
-        """Analyze a frame using the current phase, update internal state.
-
-        Requires THREAT_CONFIRM_COUNT consecutive threat detections before
-        switching to defusal — avoids false positive phase flips.
-        Returns the full dashboard-ready state dict.
-        """
-        result = analyze_frame(image_b64, phase=self.phase)
+        """Analyze a frame, always in recon mode. No phase switching."""
+        result = analyze_frame(image_b64, phase="recon")
         self.frame_count += 1
 
-        # Accumulate rooms across frames.
         for room in result.get("rooms", []):
             key = room.get("type", "Unknown")
             self.rooms_seen[key] = room
 
-        # Never auto-switch phase — operator controls mode manually.
-        # Strip any phase/defusal changes the VLM tries to make.
         result.pop("defusal", None)
         result.pop("mission_phase", None)
 
-        # Include cumulative rooms (all rooms seen so far, not just this frame).
+        people_count = sum(
+            r.get("people", 0) for r in result.get("rooms", [])
+        )
+        person_annotations = [
+            a for a in result.get("annotations", [])
+            if a.get("category") == "person"
+        ]
+        result["evacuation_alert"] = people_count > 0 or len(person_annotations) > 0
+        result["people_detected"] = max(people_count, len(person_annotations))
+
         result["rooms_cumulative"] = list(self.rooms_seen.values())
 
         return result
 
     def reset(self):
-        """Reset to recon mode (e.g. after threat is cleared)."""
-        self.phase = "recon"
-        self.threat_active = False
         self.rooms_seen.clear()
         self.frame_count = 0
 

@@ -70,25 +70,12 @@ body {
   gap: 12px;
 }
 
-.brand-mark {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--md-primary);
-  flex-shrink: 0;
-}
-
 .brand-title {
-  font-weight: 500;
-  font-size: 18px;
-  letter-spacing: -0.02em;
-  color: var(--md-on-surface);
-}
-
-.brand-sub {
-  color: var(--secondary-text);
-  font-size: 13px;
-  font-weight: 400;
+  font-family: 'Orbitron', sans-serif;
+  font-weight: 900;
+  font-size: 22px;
+  letter-spacing: 0.15em;
+  color: #223699;
   letter-spacing: 0;
 }
 
@@ -185,9 +172,9 @@ body {
   letter-spacing: 0;
 }
 
-/* ---------- Map panel ---------- */
+/* ---------- Camera panel (left, full-height) ---------- */
 
-.panel-map {
+.panel-camera {
   grid-row: 1 / -1;
 }
 
@@ -880,6 +867,7 @@ body.defusal-active {
   pointer-events: none;
 }
 
+<<<<<<< Updated upstream
 .footer-autonomy {
   align-items: center;
 }
@@ -926,4 +914,70 @@ body.defusal-active {
   opacity: 0.38;
   cursor: not-allowed;
   pointer-events: none;
+}
+
+/* ── Evacuation Banner ─────────────────────────────────────── */
+
+.evacuation-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px 24px;
+  background: #b71c1c;
+  color: #fff;
+  font-family: var(--font);
+  animation: evac-pulse 1.2s ease-in-out infinite;
+}
+
+.evacuation-banner[hidden] { display: none; }
+
+.evacuation-icon {
+  font-size: 32px;
+  line-height: 1;
+}
+
+.evacuation-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.evacuation-text strong {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+
+.evacuation-text span {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  opacity: 0.9;
+}
+
+.evacuation-count {
+  font-size: 16px;
+  font-weight: 700;
+  background: rgba(0,0,0,0.3);
+  padding: 6px 14px;
+  border-radius: 6px;
+}
+
+@keyframes evac-pulse {
+  0%, 100% { background: #b71c1c; }
+  50%      { background: #d32f2f; }
+}
+
+body.evacuation-active .header-bar {
+  margin-top: 72px;
+}
+
+body.evacuation-active {
+  border: 3px solid #b71c1c;
 }

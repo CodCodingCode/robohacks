@@ -86,15 +86,10 @@
   const missionBar = document.getElementById("mission-mode-bar");
 
   const autonomyToggle = document.getElementById("autonomy-toggle");
+  const evacBanner = document.getElementById("evacuation-banner");
+  const evacCount = document.getElementById("evac-people-count");
 
-  const defusalEls = {
-    device: document.getElementById("defusal-device"),
-    recommendation: document.getElementById("defusal-recommendation"),
-    confidence: document.getElementById("defusal-confidence"),
-    status: document.getElementById("defusal-status"),
-    wires: document.getElementById("defusal-wires"),
-    log: document.getElementById("defusal-log"),
-  };
+  const defusalEls = {};
 
   ReconMap.initMap(canvas);
 
@@ -151,11 +146,10 @@
   function renderAll() {
     ReconIntel.renderIntel(state.rooms || [], intelEl, state.radar_targets || []);
     ReconTelemetry.renderTelemetry(state.telemetry || [], telemetryEl);
-    ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
-    ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     renderSemanticPlan(state.semantic_plan);
     ReconIntel.logPlanUpdate(intelEl, state.semantic_plan);
     renderAutonomy(state.autonomy);
+    renderEvacuationBanner(state);
     updateStatusBar(state);
     updateStalenessDom();
   }
@@ -166,11 +160,20 @@
     autonomyToggle.textContent = enabled ? "ON" : "OFF";
     autonomyToggle.classList.toggle("btn-autonomy-on", enabled);
     autonomyToggle.classList.toggle("btn-autonomy-off", !enabled);
-    // Show pending command as a tooltip so the operator can see intent.
     const cmd = autonomy.cmd || {};
     autonomyToggle.title = cmd.reason
       ? `${cmd.kind}: ${cmd.reason}`
       : "Enable/disable autonomous planner execution";
+  }
+
+  function renderEvacuationBanner(s) {
+    if (!evacBanner) return;
+    const active = !!(s.evacuation_alert);
+    evacBanner.hidden = !active;
+    document.body.classList.toggle("evacuation-active", active);
+    if (evacCount) {
+      evacCount.textContent = String(s.people_detected || 0);
+    }
   }
 
   const vlmPlanEl = document.getElementById("vlm-plan");
@@ -211,8 +214,8 @@
       btn.classList.toggle("active", btn.dataset.mode === phase);
     });
 
-    if (s.defusal && s.defusal.active) {
-      connectionChip.textContent = "Defusal";
+    if (s.evacuation_alert) {
+      connectionChip.textContent = "ALERT";
       connectionChip.className = "chip chip-red";
     } else if (liveWs) {
       if (
@@ -343,9 +346,6 @@
   let feed = null;
   let wsConn = null;
 
-  // feed=same → ws://this-host/ws (map_stream_node serves HTML + /ws on one port).
-  // feed=ws&ws=… → explicit bridge URL (e.g. laptop http.server → robot).
-  // feed=mock or default on :8766 etc. → ReconMock.
   if (liveWs) {
     wsConn = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
     connectionChip.textContent = "Connecting";
@@ -361,12 +361,10 @@
       if (!wsConn) return;
       const enabling = autonomyToggle.classList.contains("btn-autonomy-off");
       wsConn.send({ cmd: "set_autonomy", enabled: enabling });
-      // Optimistic UI update — server will confirm on next broadcast.
       autonomyToggle.textContent = enabling ? "ON" : "OFF";
       autonomyToggle.classList.toggle("btn-autonomy-on", enabling);
       autonomyToggle.classList.toggle("btn-autonomy-off", !enabling);
     });
-    // Disable the toggle when not on a live WS feed.
     autonomyToggle.disabled = !liveWs;
   }
 
