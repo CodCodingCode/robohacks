@@ -696,37 +696,24 @@ class ReconMovementSkill(Skill):
         max_duration: float,
         get_annotation,
     ):
-        """Depth-sensor approach loop.
+        """3-step P-controller approach.
 
-        VLM provides target detection and bbox (refreshed from the background
-        thread cache every ~2 s).  The depth camera provides real-time bearing
-        and distance for each short drive step, so the robot re-evaluates its
-        heading and distance every 0.4 s without waiting for a Gemini call.
-
-        If the depth camera returns no valid reading the loop falls back to the
-        bbox size proxy for arrival detection and keeps a running miss count;
-        after several consecutive misses it forces a fresh VLM call so a new
-        bbox can be attempted.
-
-        Spin direction alternates (±) each time the target is lost to avoid
-        the robot circling away from the target indefinitely.
+        Each step: get VLM bbox → compute bearing → align with P-controller
+        → drive forward. Repeats 3 times, checking for arrival between steps.
         """
-        # --- tunables --------------------------------------------------------
-        STEP_S    = 0.4    # seconds per sensor step
-        ALIGN_TOL = 0.08   # rad (~4.6°) — tight; bearing is accurate with cam intrinsics
-        CLOSE_M   = 0.45   # depth-based stop distance (metres)
-        Kp        = 1.0    # moderate gain; depth camera gives stable bearing
-        # ---------------------------------------------------------------------
+        STEP_DISTANCE_M = 1.0
+        NUM_STEPS = 3
+        ALIGN_TOL = 0.10       # rad — dead-zone for "close enough to center"
+        Kp = 0.8               # bearing → angular_z gain
+        CLOSE_ENOUGH = self._planner.CLOSE_ENOUGH
 
-        remaining = max_duration
-
-        while remaining > 0.0:
+        for step in range(NUM_STEPS):
             if self._cancelled:
                 self._stop()
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
-            # ── Get latest VLM annotation (cache preferred) ───────────────
-            cached = _get_cached_annotations(max_age_s=2.5)
+            # ── Get VLM annotation ───────────────────────────────────────
+            cached = _get_cached_annotations(max_age_s=3.0)
             if cached is not None:
                 result = {"annotations": cached}
             else:
@@ -737,96 +724,55 @@ class ReconMovementSkill(Skill):
                 result = self._analyze_frame(image_b64)
 
             annotation = get_annotation(result)
-
             if annotation is None:
-                # VLM gap (Gemini cycle latency) — coast forward at half speed
-                # so the robot keeps making progress toward where the target was.
-                # Oscillating ±spin returns to the same heading and achieves nothing.
-                self._search_dir += 1
-                if self._search_dir <= 2:
-                    # First 2 misses: coast forward
-                    self._feedback(f"VLM gap — coasting toward {target}")
-                    _publish_approach_state([], None, 0.0, "searching", _get_min_forward_m())
-                    self.mobility.send_cmd_vel(
-                        self._planner.APPROACH_SPEED * 0.5, 0.0, STEP_S
-                    )
-                else:
-                    # After 3+ misses: short spin to look around, then reset counter
-                    self._feedback(f"Searching for {target}")
-                    self._search_dir = 0
-                    _publish_approach_state([], None, 0.0, "searching", _get_min_forward_m())
-                    self.mobility.send_cmd_vel(
-                        0.0, SEARCH_SPIN_SPEED_RADPS, min(1.0, remaining)
-                    )
-                # No _sleep — send_cmd_vel already blocks for the duration
-                remaining -= STEP_S
-                continue
-
-            self._search_dir = 0  # reset miss counter — annotation found
-            bbox = annotation.get("bbox")
-            if not _valid_bbox(bbox):
-                remaining -= 0.1
-                continue
-
-            # ── Sensor readings ───────────────────────────────────────────
-            depth   = _get_depth_at_bbox(bbox)   # metres, or None (falls back to size proxy)
-            bearing = _get_bearing_rad(bbox)      # rad, camera-intrinsics preferred
-
-            # Smooth bearing with EMA to dampen bbox jitter between frames
-            if self._prev_bearing is not None:
-                bearing = 0.7 * bearing + 0.3 * self._prev_bearing
-            self._prev_bearing = bearing
-
-            # ── Arrival check ─────────────────────────────────────────────
-            if depth is not None and depth <= CLOSE_M:
-                _publish_approach_state(bbox, depth, bearing, "arrived", _get_min_forward_m())
-                self._stop()
-                return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
-            # Fallback: estimate depth from bbox when camera depth unavailable
-            if depth is None:
-                from slam.depth_fusion import estimate_depth_from_bbox  # noqa: PLC0415
-                est_depth, _ = estimate_depth_from_bbox(bbox, annotation.get("category", "object"))
-                # Also check raw size proxy — very large bboxes mean object is
-                # right in front even if the model's depth estimate is conservative.
-                _, size_proxy = bbox_to_bearing(bbox)
-                if est_depth <= CLOSE_M or size_proxy >= self._planner.CLOSE_ENOUGH:
-                    _publish_approach_state(bbox, est_depth, bearing, "arrived", _get_min_forward_m())
+                if step == 0:
                     self._stop()
-                    return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
-                depth = est_depth  # use estimated depth for speed_scale below
+                    return f"Cannot see {target}", SkillResult.FAILURE
+                # Lost sight mid-approach — coast forward
+                self._feedback(f"Lost sight of {target} — coasting")
+                duration = STEP_DISTANCE_M / MAX_FORWARD_SPEED_MPS
+                self.mobility.send_cmd_vel(
+                    self._planner.APPROACH_SPEED * 0.5, 0.0, duration,
+                )
+                continue
+
+            label = annotation.get("label", target)
+            bbox = annotation.get("bbox")
+            if not bbox or not _valid_bbox(bbox):
+                continue
+
+            # ── Arrival check (bbox size proxy) ──────────────────────────
+            _, size_proxy = bbox_to_bearing(bbox)
+            if size_proxy >= CLOSE_ENOUGH:
+                fwd = _get_min_forward_m()
+                _publish_approach_state(bbox, None, 0.0, "arrived", fwd)
+                self._stop()
+                return f"Arrived near {label}", SkillResult.SUCCESS
 
             # ── Obstacle check ───────────────────────────────────────────
             fwd = _get_min_forward_m()
             if fwd is not None and fwd < _OBSTACLE_STOP_M:
-                _publish_approach_state(bbox, depth, bearing, "obstacle", fwd)
+                _publish_approach_state(bbox, None, 0.0, "obstacle", fwd)
                 self._stop()
-                self._feedback(f"Obstacle {fwd:.2f}m ahead — stopping")
                 return f"Obstacle blocked approach to {target}", SkillResult.FAILURE
 
-            # ── Orient then drive (one short step per loop iteration) ─────
-            fwd = _get_min_forward_m()
-            dur = min(STEP_S, remaining)
+            # ── Bearing correction (P-controller) ────────────────────────
+            bearing, _ = bbox_to_bearing(bbox)
             if abs(bearing) > ALIGN_TOL:
-                # Rotate to center the target; gentle forward motion while correcting.
                 angular_z = _bearing_to_angular_z(bearing, gain=Kp)
-                forward_scale = max(0.3, 1.0 - abs(bearing) / (math.pi / 3.0))
-                linear_x = self._planner.APPROACH_SPEED * forward_scale
+                align_dur = min(abs(bearing) / MAX_ANGULAR_SPEED_RADPS, 1.0)
                 self._feedback(
-                    f"Aligning to {target} "
-                    f"(bearing={bearing:+.2f} rad, depth={depth:.2f}m)"
+                    f"Step {step + 1}/{NUM_STEPS}: aligning to {target} "
+                    f"(bearing={bearing:+.2f} rad)"
                 )
-                _publish_approach_state(bbox, depth, bearing, "aligning", fwd)
-            else:
-                # Heading is good — drive straight with zero angular correction.
-                speed_scale = min(1.0, max(0.4, (depth - CLOSE_M) / 1.0))
-                linear_x = self._planner.APPROACH_SPEED * speed_scale
-                angular_z = 0.0
-                self._feedback(f"Driving to {target} (depth={depth:.2f}m)")
-                _publish_approach_state(bbox, depth, bearing, "driving", fwd)
+                _publish_approach_state(bbox, None, bearing, "aligning", fwd)
+                self.mobility.send_cmd_vel(0.0, angular_z, align_dur)
 
-            self.mobility.send_cmd_vel(linear_x, angular_z, dur)
-            # No _sleep — send_cmd_vel already blocks for the duration
-            remaining -= dur
+            # ── Drive forward ────────────────────────────────────────────
+            duration = STEP_DISTANCE_M / MAX_FORWARD_SPEED_MPS
+            self._feedback(f"Step {step + 1}/{NUM_STEPS}: driving toward {target}")
+            _publish_approach_state(bbox, None, bearing, "driving", fwd)
+            self.mobility.send_cmd_vel(MAX_FORWARD_SPEED_MPS, 0.0, duration)
 
         self._stop()
         return f"Could not reach {target}; holding position", SkillResult.FAILURE

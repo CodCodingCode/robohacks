@@ -204,7 +204,7 @@ def test_approach_object_moves_toward_centered_matching_target_annotation():
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
-def test_approach_object_searches_when_target_is_not_visible():
+def test_approach_object_stops_when_target_is_not_visible():
     def analyzer(_image):
         return {
             "annotations": [
@@ -222,10 +222,7 @@ def test_approach_object_searches_when_target_is_not_visible():
     )
 
     assert status == SkillResult.FAILURE
-    assert "Could not reach" in message
-    # When target not found, first action is forward coast (not spin) for miss ≤ 2
-    first_cmd = skill.mobility.cmd_vel[0]
-    assert first_cmd[0] > 0.0  # coasting forward
+    assert "Cannot see" in message
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
