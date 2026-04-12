@@ -548,25 +548,20 @@ class MapStreamNode(Node):
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         w, h = msg.info.width, msg.info.height
         with self._lock:
-            # Once we have a live SLAM map from dynamic_map, completely
-            # ignore the /map topic — it's the stale navigation_map_server.
-            if self._have_live_slam:
-                self.get_logger().debug(
-                    f"[MAP-DEBUG] /map topic IGNORED (have live SLAM) — {w}x{h} stamp={stamp:.1f}"
+            # Always accept the newest map — slam_toolbox publishes to /map
+            # directly when active, overriding the stale navigation_map_server.
+            if stamp > self._last_map_stamp:
+                self.get_logger().info(
+                    f"[MAP-DEBUG] /map ACCEPTED {w}x{h} stamp={stamp:.1f}"
                 )
-                return
-            self.get_logger().info(
-                f"[MAP-DEBUG] /map topic ACCEPTED (no live SLAM yet) — {w}x{h} stamp={stamp:.1f}"
-            )
-            self._last_map = msg
-            self._last_map_stamp = stamp
+                self._last_map = msg
+                self._last_map_stamp = stamp
 
     def _poll_map(self) -> None:
         """Timer callback: request the latest map from slam_toolbox."""
         if self._map_poll_pending:
             return
         if not self._dynamic_map_cli.service_is_ready():
-            self.get_logger().debug("[MAP-DEBUG] dynamic_map service NOT ready (slam_toolbox not active?)")
             return
         self._map_poll_pending = True
         future = self._dynamic_map_cli.call_async(GetMap.Request())
@@ -576,24 +571,15 @@ class MapStreamNode(Node):
         self._map_poll_pending = False
         try:
             resp = future.result()
-        except Exception as e:
-            self.get_logger().warn(f"[MAP-DEBUG] dynamic_map call failed: {e}")
+        except Exception:
             return
         if resp and resp.map and resp.map.info.width > 0:
             stamp = resp.map.header.stamp.sec + resp.map.header.stamp.nanosec * 1e-9
             w, h = resp.map.info.width, resp.map.info.height
-            was_live = self._have_live_slam
             with self._lock:
                 self._last_map = resp.map
                 self._last_map_stamp = stamp
-                self._have_live_slam = True
-            if not was_live:
-                self.get_logger().info(
-                    f"[MAP-DEBUG] LIVE SLAM map from dynamic_map! {w}x{h} stamp={stamp:.1f} — "
-                    "ignoring /map topic from now on"
-                )
-        else:
-            self.get_logger().debug("[MAP-DEBUG] dynamic_map returned empty/None")
+            self.get_logger().info(f"[MAP-DEBUG] dynamic_map got {w}x{h} stamp={stamp:.1f}")
 
     def _battery_cb(self, msg: BatteryState) -> None:
         if msg.percentage < 0.0:
@@ -687,6 +673,12 @@ class MapStreamNode(Node):
             camera_info = dict(self._camera_info) if self._camera_info else None
 
         if pose is not None and annotations:
+            self.get_logger().info(
+                f"[VLM-DEPTH] projecting {len(annotations)} annotations | "
+                f"pose=({pose[0]:.2f}, {pose[1]:.2f}, θ={pose[2]:.2f}) | "
+                f"depth_image={'YES' if depth_m is not None else 'NO'} | "
+                f"camera_info={'YES' if camera_info else 'NO'}"
+            )
             new_markers = markers_from_annotations(
                 annotations,
                 depth_m,
@@ -694,6 +686,14 @@ class MapStreamNode(Node):
                 camera_info=camera_info,
                 now=now,
             )
+            for m in new_markers:
+                self.get_logger().info(
+                    f"[VLM-MARKER] {m['label']:20s} → "
+                    f"world=({m['x']:.2f}, {m['y']:.2f}) "
+                    f"depth={m['depth_m']:.2f}m "
+                    f"bearing={m['bearing_rad']:.3f}rad "
+                    f"source={m['source']}"
+                )
             with self._lock:
                 self._merge_into_store(new_markers)
 
@@ -859,12 +859,15 @@ class MapStreamNode(Node):
 
     def _parse_manual_motion(self, command: str) -> tuple[str, float, float, float] | None:
         tokens = command.split()
+        self.get_logger().info(f"[CMD] _parse_manual_motion tokens={tokens}")
 
         # Goal-directed or conditional commands belong to the brain.
         if any(w in tokens for w in self._CONDITIONAL_WORDS):
+            self.get_logger().info("[CMD] → conditional word detected, routing to brain")
             return None
         # More than 4 tokens is almost certainly natural language, not a simple move.
         if len(tokens) > 4:
+            self.get_logger().info("[CMD] → too many tokens (>4), routing to brain")
             return None
 
         duration = _MANUAL_DEFAULT_DURATION_S
@@ -876,13 +879,18 @@ class MapStreamNode(Node):
                 continue
 
         if any(word in tokens for word in ("forward", "ahead")):
+            self.get_logger().info(f"[CMD] → matched FORWARD, duration={duration}")
             return "forward", _MANUAL_FORWARD_MPS, 0.0, duration
-        if any(word in tokens for word in ("back", "backward", "reverse")):
+        if any(word in tokens for word in ("back", "backward", "backwards", "reverse")):
+            self.get_logger().info(f"[CMD] → matched BACK, duration={duration}")
             return "back", _MANUAL_BACKWARD_MPS, 0.0, duration
         if "left" in tokens:
+            self.get_logger().info(f"[CMD] → matched LEFT, duration={duration}")
             return "left", 0.0, _MANUAL_TURN_RADPS, duration
         if "right" in tokens:
+            self.get_logger().info(f"[CMD] → matched RIGHT, duration={duration}")
             return "right", 0.0, -_MANUAL_TURN_RADPS, duration
+        self.get_logger().info(f"[CMD] → no motion keyword matched in {tokens}")
         return None
 
     def _next_manual_motion_token(self) -> int:
@@ -1130,13 +1138,18 @@ def run_vlm_thread(node: MapStreamNode) -> None:
             node._tts = tts
     print("[VLM] VLM thread started.")
 
+    _vlm_cycle = 0
     while True:
         time.sleep(VLM_INTERVAL)
+        _vlm_cycle += 1
         image_b64 = node.get_image_b64()
         if image_b64 is None:
+            if _vlm_cycle <= 5 or _vlm_cycle % 10 == 0:
+                print(f"[VLM] cycle {_vlm_cycle}: no camera frame — skipping")
             continue
         try:
             planner_phase = node.get_planner_phase()
+            print(f"[VLM] cycle {_vlm_cycle}: got frame ({len(image_b64)} bytes), phase={planner_phase}, calling Gemini…")
             if planner_phase == "approach":
                 # Bypass VLMSession: call defusal prompt directly so the
                 # defusal/wires keys are NOT stripped before reaching the dashboard.
@@ -1144,12 +1157,16 @@ def run_vlm_thread(node: MapStreamNode) -> None:
             else:
                 # "recon" or "done": use session for cumulative rooms tracking.
                 result = session.update(image_b64)
+            annotations = result.get("annotations", [])
+            print(f"[VLM] cycle {_vlm_cycle}: Gemini returned {len(annotations)} annotations")
             node.set_vlm_result(result)
 
             if detector and tts:
                 _handle_intruder_alert(result, detector, tts)
         except Exception as exc:
-            print(f"[VLM] analysis error: {exc}")
+            import traceback
+            print(f"[VLM] cycle {_vlm_cycle} ERROR: {exc}")
+            traceback.print_exc()
 
 
 async def serve(node: MapStreamNode, host: str, port: int) -> None:
@@ -1266,6 +1283,7 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                         }))
                 elif msg.get("type") == "action":
                     text = str(msg.get("text", "")).strip()
+                    node.get_logger().info(f"[CMD] received action: '{text}'")
                     if not text:
                         await ws.send(json.dumps({
                             "type": "status",
@@ -1274,12 +1292,15 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                         }))
                         continue
 
-                    if await command_router.handle(text, node):
+                    router_handled = await command_router.handle(text, node)
+                    node.get_logger().info(f"[CMD] command_router handled={router_handled}")
+                    if router_handled:
                         if normalize_command(text) in STOP_COMMANDS:
                             await command_executor.stop()
                         continue
 
                     status, is_error = node.handle_operator_command(text)
+                    node.get_logger().info(f"[CMD] handle_operator_command → status='{status}' is_error={is_error}")
                     if not is_error:
                         phase = (
                             "executing"

@@ -26,11 +26,63 @@
     centerWY: 5,
   };
 
+  // Hit targets for marker hover tooltips — rebuilt every frame.
+  let markerHitTargets = [];
+  let tooltipEl = null;
+
   function initMap(el) {
     canvas = el;
     ctx = canvas.getContext("2d");
     resize();
     window.addEventListener("resize", resize);
+
+    // Create tooltip element.
+    tooltipEl = document.createElement("div");
+    tooltipEl.id = "map-tooltip";
+    canvas.parentElement.appendChild(tooltipEl);
+
+    // Hover hit-test on canvas.
+    canvas.addEventListener("mousemove", function (e) {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      let hit = null;
+      for (const t of markerHitTargets) {
+        const dx = mx - t.sx;
+        const dy = my - t.sy;
+        if (dx * dx + dy * dy < 144) {
+          // 12px radius
+          hit = t;
+          break;
+        }
+      }
+      if (hit) {
+        const m = hit.marker;
+        const depthSrc = m.source === "vlm_depth" ? "measured" : "assumed";
+        const depthClass =
+          m.source === "vlm_depth" ? "tt-depth-measured" : "tt-depth-assumed";
+        const depthStr =
+          m.depth_m != null && isFinite(m.depth_m)
+            ? `<span class="${depthClass}">${Number(m.depth_m).toFixed(2)}m (${depthSrc})</span>`
+            : "unknown";
+        tooltipEl.innerHTML =
+          `<div class="tt-label" style="color:${markerColor(m.category)}">${m.label || "object"}</div>` +
+          `<div class="tt-row">${m.category || "object"}</div>` +
+          `<div class="tt-row">depth: ${depthStr}</div>`;
+        tooltipEl.style.display = "block";
+        tooltipEl.style.left = hit.sx + 14 + "px";
+        tooltipEl.style.top = hit.sy - 10 + "px";
+        canvas.style.cursor = "crosshair";
+      } else {
+        tooltipEl.style.display = "none";
+        canvas.style.cursor = "";
+      }
+    });
+
+    canvas.addEventListener("mouseleave", function () {
+      if (tooltipEl) tooltipEl.style.display = "none";
+      canvas.style.cursor = "";
+    });
   }
 
   function resize() {
@@ -252,11 +304,15 @@
   function drawSemanticMarkers(markers) {
     // Collect label boxes so we can spread overlapping ones.
     const placed = []; // {lx, ly, w, h} of already-placed label boxes
+    markerHitTargets = []; // rebuild each frame
 
     for (const marker of markers) {
       const sx = toScreenX(marker.x, marker.y);
       const sy = toScreenY(marker.x, marker.y);
       const color = markerColor(marker.category);
+
+      // Store hit target for hover tooltip.
+      markerHitTargets.push({ sx, sy, marker });
 
       // Draw the dot at the actual position.
       ctx.save();
@@ -264,6 +320,19 @@
       ctx.beginPath();
       ctx.arc(sx, sy, 4, 0, Math.PI * 2);
       ctx.fill();
+
+      // Dashed ring for assumed-depth markers.
+      if (marker.source === "vlm_assumed") {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(sx, sy, 7, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
 
       const labelText = String(marker.label || "object").slice(0, 16);
       ctx.font = "500 10px 'JetBrains Mono', monospace";

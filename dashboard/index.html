@@ -114,39 +114,21 @@
           <div id="telemetry-feed" class="telemetry-feed"></div>
         </div>
 
-        <div class="panel panel-commands">
-          <div class="panel-header">
-            <span class="section-label">COMMAND</span>
-            <span class="panel-meta" id="commands-meta">—</span>
-          </div>
+        <!-- commands panel hidden -->
+        <div class="panel panel-commands" style="display: none">
           <ul id="commands-log" class="commands-log"></ul>
           <form id="commands-form" class="commands-form" autocomplete="off">
-            <div class="input-wrap">
-              <span class="input-caret">›</span>
-              <textarea
-                id="commands-input"
-                class="commands-input"
-                rows="2"
-                placeholder="Tell the robot what to do..."
-              ></textarea>
-            </div>
-            <span class="input-hint">Ctrl+Enter to send</span>
-            <div class="commands-row">
-              <button
-                type="submit"
-                id="commands-send"
-                class="btn-pill btn-send"
-              >
-                SEND
-              </button>
-              <button
-                type="button"
-                id="commands-stop"
-                class="btn-pill btn-stop"
-              >
-                STOP
-              </button>
-            </div>
+            <textarea
+              id="commands-input"
+              class="commands-input"
+              rows="2"
+            ></textarea>
+            <button type="submit" id="commands-send" class="btn-pill btn-send">
+              SEND
+            </button>
+            <button type="button" id="commands-stop" class="btn-pill btn-stop">
+              STOP
+            </button>
           </form>
         </div>
       </section>
