@@ -103,7 +103,7 @@ class Planner:
 
     # Tunable thresholds — override per-robot via `planner.APPROACH_SPEED = 0.05`
     BEARING_TOLERANCE: float = 0.10   # ~5.7 deg dead zone
-    CLOSE_ENOUGH: float = 0.25        # bbox fills ~25% of frame → stop (~1m away)
+    CLOSE_ENOUGH: float = 0.35        # bbox fills ~35% of frame → stop (~0.7m away)
     CLOSE_ENOUGH_M: float = 0.8       # depth camera: stop when object < 0.8m away
     RECON_STEP_RAD: float = math.pi / 4  # 45 deg scan steps
     RECON_STEPS_TOTAL: int = 8        # 8 steps = full 360

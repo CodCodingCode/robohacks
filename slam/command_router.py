@@ -67,8 +67,13 @@ def route_command(text: str) -> CommandRoute:
 
 
 def _extract_approach_target(command: str) -> str:
-    """Extract object name from 'move to X', 'approach X', 'go to X', etc."""
+    """Extract the core object name from approach commands.
+
+    Strips trailing qualifiers so 'move to the chair that's farther away'
+    produces 'chair', not 'chair that's farther away'.
+    """
     import re
+
     patterns = [
         r"^(?:move|go|navigate|drive|walk)\s+(?:to|towards?|toward)\s+(?:the\s+)?(.+)$",
         r"^(?:approach|inspect|reach|find|locate)\s+(?:the\s+)?(.+)$",
@@ -76,7 +81,18 @@ def _extract_approach_target(command: str) -> str:
     for pat in patterns:
         m = re.match(pat, command)
         if m:
-            target = m.group(1).strip()
+            raw = m.group(1).strip()
+            # Strip trailing qualifier clauses: "that's ...", "on the ...", etc.
+            raw = re.split(
+                r"\b(?:that(?:'s|s)?\b|which\b|who\b|on\s+the\b|in\s+the\b"
+                r"|near\b|next\s+to\b|to\s+the\b|by\s+the\b|farther|further"
+                r"|closer|right|left|behind|front|across)",
+                raw,
+                maxsplit=1,
+            )[0].strip()
+            # Keep only the first 1-3 meaningful words (e.g. "office chair")
+            words = raw.split()
+            target = " ".join(words[:3]).strip(" ,")
             if target and target not in {"area", "room", "wall", "obstacle"}:
                 return target
     return ""
