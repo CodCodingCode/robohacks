@@ -211,6 +211,8 @@ SUPPORTED_ACTIONS = {
     "reset_recon",
     "rotate",       # turn by angle: distance_m = degrees (+ left/CCW, - right/CW)
     "find_object",  # spin until target found, then approach
+    "move_left",    # rotate left, drive forward, rotate back
+    "move_right",   # rotate right, drive forward, rotate back
 }
 
 MAX_FORWARD_SPEED_MPS = 0.20
@@ -256,7 +258,8 @@ class ReconMovementSkill(Skill):
     def guidelines(self) -> str:
         return (
             "Use for bounded recon movement only: scan_room, move_forward, "
-            "approach_detected_threat, approach_object, hold, or reset_recon."
+            "move_left, move_right, approach_detected_threat, approach_object, "
+            "hold, or reset_recon."
         )
 
     def execute(
@@ -285,6 +288,18 @@ class ReconMovementSkill(Skill):
             return self._scan_room()
         if action == "move_forward":
             return self._move_forward(distance_m, max_duration_s)
+        if action == "move_left":
+            return self._move_lateral(
+                direction=1,
+                distance_m=distance_m,
+                max_duration_s=max_duration_s,
+            )
+        if action == "move_right":
+            return self._move_lateral(
+                direction=-1,
+                distance_m=distance_m,
+                max_duration_s=max_duration_s,
+            )
         if action == "approach_object":
             return self._approach_object(target, max_duration_s)
         if action == "rotate":
@@ -328,6 +343,43 @@ class ReconMovementSkill(Skill):
             duration_s=duration,
             success_message=f"Issued forward movement for up to {distance:.2f}m",
         )
+
+    def _move_lateral(self, direction: int, distance_m: float, max_duration_s: float):
+        """Approximate a lateral step by turning 90 deg, driving, then turning back."""
+        self._require_mobility()
+        distance = _coerce_float(distance_m, default=0.5)
+        if distance <= 0.0:
+            return "distance_m must be positive", SkillResult.FAILURE
+        distance = min(distance, MAX_FORWARD_DISTANCE_M)
+        max_duration = min(
+            _clamp_duration(max_duration_s, default=20.0),
+            MAX_APPROACH_DURATION_S,
+        )
+        turn_sign = 1 if direction >= 0 else -1
+        label = "left" if turn_sign > 0 else "right"
+        turn_duration = (math.pi / 2.0) / MAX_ANGULAR_SPEED_RADPS
+        drive_duration = distance / MAX_FORWARD_SPEED_MPS
+        steps = (
+            (0.0, turn_sign * MAX_ANGULAR_SPEED_RADPS, turn_duration),
+            (MAX_FORWARD_SPEED_MPS, 0.0, drive_duration),
+            (0.0, -turn_sign * MAX_ANGULAR_SPEED_RADPS, turn_duration),
+        )
+
+        remaining = max_duration
+        for linear_x, angular_z, duration in steps:
+            segment_remaining = duration
+            while segment_remaining > 0.0 and remaining > 0.0:
+                if self._cancelled:
+                    self._stop()
+                    return f"Move {label} cancelled", SkillResult.CANCELLED
+                chunk = min(segment_remaining, remaining, MAX_COMMAND_DURATION_S)
+                self.mobility.send_cmd_vel(linear_x, angular_z, chunk)
+                self._sleep(chunk)
+                segment_remaining -= chunk
+                remaining -= chunk
+
+        self._stop()
+        return f"Issued {label} movement for up to {distance:.2f}m", SkillResult.SUCCESS
 
     def _approach_detected_threat(self, max_duration_s: float):
         self._require_mobility()

@@ -8,6 +8,7 @@ to the PEAS cloud agent via /brain/chat_in.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ class CommandRoute:
     kind: str
     text: str
     target: str = ""
+    distance_m: float = 0.0
 
 
 def normalize_command(text: str) -> str:
@@ -60,10 +62,39 @@ def route_command(text: str) -> CommandRoute:
         return CommandRoute("stop", "Abort received; holding position")
     if command in CLEAR_MAP_COMMANDS:
         return CommandRoute("clear_map", "Map annotations cleared")
+    lateral = _extract_lateral_move(command)
+    if lateral:
+        side, distance_m = lateral
+        return CommandRoute(
+            "lateral_move",
+            f"Moving {side} {distance_m:.2f}m",
+            target=side,
+            distance_m=distance_m,
+        )
     target = _extract_approach_target(command)
     if target:
         return CommandRoute("approach_target", f"Approaching {target}", target=target)
     return CommandRoute("fallback", "Forward to brain agent")
+
+
+def _extract_lateral_move(command: str) -> tuple[str, float] | None:
+    """Return (left/right, distance_m) for lateral reposition commands."""
+    match = re.match(
+        r"^(?:move|go|shift|drive|walk)\s+(?:to\s+the\s+)?(left|right)\b(.*)$",
+        command,
+    )
+    if not match:
+        return None
+    side = match.group(1)
+    remainder = match.group(2) or ""
+    distance_m = 0.5
+    distance_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:m|meter|meters|metre|metres)?\b",
+        remainder,
+    )
+    if distance_match:
+        distance_m = float(distance_match.group(1))
+    return side, distance_m
 
 
 def _extract_approach_target(command: str) -> str:
@@ -74,8 +105,6 @@ def _extract_approach_target(command: str) -> str:
     'move to the chair in your current field of view' → 'chair'
     'approach the office chair on the left' → 'office chair'
     """
-    import re
-
     patterns = [
         r"^(?:move|go|navigate|drive|walk)\s+(?:to|towards?|toward)\s+(.+)$",
         r"^(?:approach|inspect|reach|find|locate)\s+(.+)$",
@@ -138,6 +167,21 @@ class ReconCommandRouter:
             if node is not None:
                 node.clear_persistent_markers()
             await self._broadcast({"phase": "done", "text": route.text})
+            return True
+        if route.kind == "lateral_move":
+            action = f"move_{route.target}"
+            if node is not None:
+                node.activate_agent("recon_agent")
+                node.publish_chat_in(
+                    "Call recon_movement skill with "
+                    f"action={action} and distance_m={route.distance_m:.2f}"
+                )
+            await self._broadcast(
+                {
+                    "phase": "planning",
+                    "text": f"→ moving {route.target} {route.distance_m:.2f}m",
+                }
+            )
             return True
         if route.kind == "approach_target":
             if node is not None:

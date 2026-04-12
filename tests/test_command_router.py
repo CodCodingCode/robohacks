@@ -14,6 +14,22 @@ def test_forward_falls_back_to_brain_agent():
     assert route.kind == "fallback"
 
 
+def test_move_right_routes_to_lateral_skill_with_default_distance():
+    route = route_command("move right")
+
+    assert route.kind == "lateral_move"
+    assert route.target == "right"
+    assert route.distance_m == 0.5
+
+
+def test_move_left_routes_to_lateral_skill_with_distance():
+    route = route_command("shift left 0.25m")
+
+    assert route.kind == "lateral_move"
+    assert route.target == "left"
+    assert route.distance_m == 0.25
+
+
 def test_approach_device_falls_back_to_brain_agent():
     route = route_command("approach the device")
 

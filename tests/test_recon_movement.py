@@ -74,6 +74,36 @@ def test_move_forward_clamps_distance_and_chunks_velocity_commands():
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
+def test_move_right_turns_drives_and_restores_heading():
+    skill = make_skill()
+
+    message, status = skill.execute("move_right", distance_m=0.5, max_duration_s=20.0)
+
+    assert status == SkillResult.SUCCESS
+    assert "right" in message
+    assert skill.mobility.cmd_vel == [
+        (0.0, -MAX_ANGULAR_SPEED_RADPS, (math.pi / 2.0) / MAX_ANGULAR_SPEED_RADPS),
+        (MAX_FORWARD_SPEED_MPS, 0.0, 0.5 / MAX_FORWARD_SPEED_MPS),
+        (0.0, MAX_ANGULAR_SPEED_RADPS, (math.pi / 2.0) / MAX_ANGULAR_SPEED_RADPS),
+        (0.0, 0.0, 0.1),
+    ]
+
+
+def test_move_left_turns_drives_and_restores_heading():
+    skill = make_skill()
+
+    message, status = skill.execute("move_left", distance_m=0.25, max_duration_s=20.0)
+
+    assert status == SkillResult.SUCCESS
+    assert "left" in message
+    assert skill.mobility.cmd_vel == [
+        (0.0, MAX_ANGULAR_SPEED_RADPS, (math.pi / 2.0) / MAX_ANGULAR_SPEED_RADPS),
+        (MAX_FORWARD_SPEED_MPS, 0.0, 0.25 / MAX_FORWARD_SPEED_MPS),
+        (0.0, -MAX_ANGULAR_SPEED_RADPS, (math.pi / 2.0) / MAX_ANGULAR_SPEED_RADPS),
+        (0.0, 0.0, 0.1),
+    ]
+
+
 def test_approach_detected_threat_requires_camera_frame():
     skill = make_skill(analyzer=lambda _image: {})
 
