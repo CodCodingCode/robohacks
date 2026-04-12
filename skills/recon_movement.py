@@ -78,11 +78,11 @@ SUPPORTED_ACTIONS = {
     "reset_recon",
 }
 
-MAX_FORWARD_SPEED_MPS = 0.15
-MAX_ANGULAR_SPEED_RADPS = 0.40
-MAX_FORWARD_DISTANCE_M = 3.00
-MAX_COMMAND_DURATION_S = 10.00
-MAX_APPROACH_DURATION_S = 60.00
+MAX_FORWARD_SPEED_MPS = 0.20
+MAX_ANGULAR_SPEED_RADPS = 0.60
+MAX_FORWARD_DISTANCE_M = 5.00
+MAX_COMMAND_DURATION_S = 12.00
+MAX_APPROACH_DURATION_S = 90.00
 SEARCH_SPIN_SPEED_RADPS = 0.25
 SCAN_STEPS = 8
 
@@ -158,12 +158,14 @@ class ReconMovementSkill(Skill):
     def _scan_room(self):
         self._require_mobility()
         step = (2.0 * math.pi) / SCAN_STEPS
+        step_duration = step / MAX_ANGULAR_SPEED_RADPS
         for idx in range(SCAN_STEPS):
             if self._cancelled:
                 self._stop()
                 return "Scan cancelled", SkillResult.CANCELLED
             self._feedback(f"Scanning direction {idx + 1}/{SCAN_STEPS}")
-            self.mobility.rotate(step)
+            self.mobility.send_cmd_vel(0.0, MAX_ANGULAR_SPEED_RADPS, step_duration)
+            self._sleep(step_duration)
         self._stop()
         return "Room scan complete", SkillResult.SUCCESS
 
@@ -316,8 +318,12 @@ class ReconMovementSkill(Skill):
             return None, max(duration, 0.1)
         if command.kind == "rotate":
             angle = _clamp(command.angle, -math.pi / 2.0, math.pi / 2.0)
-            self.mobility.rotate(angle)
-            return None, 1.0
+            if abs(angle) > 1e-3:
+                duration = min(abs(angle) / MAX_ANGULAR_SPEED_RADPS, MAX_COMMAND_DURATION_S)
+                angular_z = math.copysign(MAX_ANGULAR_SPEED_RADPS, angle)
+                self.mobility.send_cmd_vel(0.0, angular_z, duration)
+                self._sleep(duration)
+            return None, max(abs(angle) / MAX_ANGULAR_SPEED_RADPS, 0.1)
         if command.kind == "cmd_vel":
             linear_x = _clamp(
                 command.linear_x,

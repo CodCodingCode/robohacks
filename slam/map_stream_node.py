@@ -160,8 +160,23 @@ class MapStreamNode(Node):
         self._chat_out_queue = None   # asyncio.Queue, set by set_chat_loop()
         self._chat_out_loop = None    # asyncio event loop, set by set_chat_loop()
         self._active_directive: str | None = None
+        self._skills_loaded: bool = False  # True once available_skills contains our skill
         self.create_subscription(String, "/brain/chat_out", self._chat_out_cb, 10)
         self.create_subscription(String, "/brain/skill_status_update", self._skill_status_cb, 10)
+        # Watch available_skills — re-register recon_agent once our skill appears.
+        try:
+            from brain_messages.msg import AvailableSkills  # noqa: PLC0415
+            _avail_qos = QoSProfile(
+                depth=1,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=QoSReliabilityPolicy.RELIABLE,
+            )
+            self.create_subscription(
+                AvailableSkills, "/brain/available_skills",
+                self._available_skills_cb, _avail_qos,
+            )
+        except Exception:
+            pass  # brain_messages not available in offline/test mode
 
         # Pose sources we accept, in order of preference. slam_toolbox's
         # /pose is the authoritative map-frame pose during mapping. Subscribe
@@ -225,6 +240,21 @@ class MapStreamNode(Node):
         from std_msgs.msg import String  # noqa: PLC0415
         import json as _json
         self._chat_in_pub.publish(String(data=_json.dumps({"text": text})))
+
+    def _available_skills_cb(self, msg) -> None:
+        """Re-register recon_agent once local/recon_movement appears in the skill list."""
+        if self._skills_loaded:
+            return
+        skill_ids = {s.id for s in msg.skills}
+        if "local/recon_movement" not in skill_ids:
+            return
+        self._skills_loaded = True
+        # Reset cache so activate_agent() will re-publish even if already sent once.
+        self._active_directive = None
+        self.activate_agent("recon_agent")
+        self.get_logger().info(
+            "[brain] recon_movement available — re-registered recon_agent with PEAS"
+        )
 
     def _chat_out_cb(self, msg) -> None:
         """ROS callback — push brain/chat_out to the async WS queue."""
@@ -586,22 +616,22 @@ class MapStreamNode(Node):
 
     def _parse_manual_motion(self, command: str) -> tuple[str, float, float, float] | None:
         tokens = command.split()
-        duration = 0.7
+        duration = _MANUAL_DEFAULT_DURATION_S
         for token in tokens:
             try:
-                duration = max(0.1, min(float(token), 1.5))
+                duration = max(0.1, min(float(token), _MANUAL_MAX_DURATION_S))
                 break
             except ValueError:
                 continue
 
         if any(word in tokens for word in ("forward", "ahead")):
-            return "forward", 0.08, 0.0, duration
+            return "forward", _MANUAL_FORWARD_MPS, 0.0, duration
         if any(word in tokens for word in ("back", "backward", "reverse")):
-            return "back", -0.06, 0.0, duration
+            return "back", _MANUAL_BACKWARD_MPS, 0.0, duration
         if "left" in tokens:
-            return "left", 0.0, 0.35, duration
+            return "left", 0.0, _MANUAL_TURN_RADPS, duration
         if "right" in tokens:
-            return "right", 0.0, -0.35, duration
+            return "right", 0.0, -_MANUAL_TURN_RADPS, duration
         return None
 
     def _next_manual_motion_token(self) -> int:
@@ -1090,6 +1120,11 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
 
 _OBSTACLE_CLEARANCE_M = 0.5   # minimum forward range before blocking motion
 _LIDAR_CHECK_INTERVAL = 0.5   # re-check LiDAR every N seconds during a forward command
+_MANUAL_DEFAULT_DURATION_S = 1.5
+_MANUAL_MAX_DURATION_S = 5.0
+_MANUAL_FORWARD_MPS = 0.16
+_MANUAL_BACKWARD_MPS = -0.12
+_MANUAL_TURN_RADPS = 0.6
 
 
 def _execute_command(node: MapStreamNode, cmd: "RobotCommand") -> None:

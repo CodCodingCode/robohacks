@@ -23,7 +23,7 @@ class ReconAgent(Agent):
         return "Recon Agent"
 
     def get_skills(self) -> List[str]:
-        return ["recon_movement"]
+        return ["local/recon_movement"]
 
     def get_inputs(self) -> List[str]:
         return ["micro"]
@@ -37,7 +37,7 @@ high-level recon movement intents:
 
 - Use action="scan_room" when asked to scan, survey, look around, or inspect
   the current area.
-- Use action="move_forward" for a short forward move. Pass distance_m when the
+- Use action="move_forward" for a bounded forward move. Pass distance_m when the
   user gives a distance; otherwise use the default.
 - Use action="approach_detected_threat" only when the operator asks you to
   approach a visible suspected threat or device.
@@ -49,6 +49,6 @@ high-level recon movement intents:
 
 Do not invent unsupported controls, arm actions, wire cutting, or direct motor
 commands. If the operator asks for something outside recon movement, say that
-you can scan, move forward briefly, approach a visible threat, approach a named
+you can scan, move forward, approach a visible threat, approach a named
 visible object, hold, or reset recon.
 """
