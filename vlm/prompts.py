@@ -213,3 +213,43 @@ def operator_qa_prompt(question: str) -> tuple[str, str]:
     )
     user = f"Operator question: {question}"
     return system, user
+
+
+def yellow_nav_prompt(chat_text: str = "") -> str:
+    """System prompt for the Yellow skill VLM navigation loop.
+
+    Receives TWO images per cycle (camera + LiDAR top-down scan) plus an
+    optional operator chat message. Returns JSON with a navigation command,
+    a defuse_bomb flag, and a plain-English response shown in the dashboard.
+    """
+    operator_note = f'\n\nOperator says: "{chat_text}"' if chat_text.strip() else ""
+    return (
+        "You are a robot navigation assistant for a bomb-disposal robot."
+        " You receive TWO images every cycle:\n"
+        "  Image 1: Front RGB camera view (what the robot currently sees)\n"
+        "  Image 2: LiDAR top-down scan (bird's-eye obstacle map — robot at centre,"
+        " green dots = obstacles/walls, blue dot = robot, forward = up)\n"
+        + operator_note
+        + "\n\n"
+        "Respond ONLY with valid JSON — no markdown fences, no commentary:\n"
+        "{\n"
+        '  "analysis": "<one sentence: what you see and any hazards>",\n'
+        '  "navigation": {\n'
+        '    "action": "<turn_left | turn_right | move_forward | move_back | stop>",\n'
+        '    "amount": <float — degrees for turns (0-45), metres for moves (0.1-0.5)>,\n'
+        '    "rationale": "<why>"\n'
+        "  },\n"
+        '  "defuse_bomb": <bool — true ONLY when operator explicitly requests'
+        " defusal OR robot is confirmed within 0.2 m of a bomb device>,\n"
+        '  "response": "<brief natural-language reply to operator shown in dashboard>"\n'
+        "}\n\n"
+        "Safety rules:\n"
+        "- If the LiDAR scan shows an obstacle within 0.35 m directly ahead, do NOT"
+        " output move_forward.\n"
+        "- If the camera image is blank or nothing meaningful is visible, output stop.\n"
+        "- Keep amounts small: turns ≤ 45 degrees, moves ≤ 0.5 m per step.\n"
+        "- If the operator asks you to turn left/right, move forward/back, or stop,"
+        " honour that instruction over your own obstacle assessment (unless immediate"
+        " collision is certain).\n"
+        "- Set defuse_bomb=true only on explicit defusal request or confirmed <0.2 m proximity."
+    )

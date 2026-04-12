@@ -340,6 +340,9 @@ class MapStreamNode(Node):
         self._set_directive_pub = self.create_publisher(String, "/brain/set_directive", 10)
         self._chat_out_queue = None   # asyncio.Queue, set by set_chat_loop()
         self._chat_out_loop = None    # asyncio event loop, set by set_chat_loop()
+
+        # Yellow skill chat bridge — dashboard action messages → /yellow/chat_input.
+        self._yellow_chat_pub = self.create_publisher(String, "/yellow/chat_input", 10)
         self._active_directive: str | None = None
         self._skills_loaded: bool = False  # True once available_skills contains our skill
         self.create_subscription(String, "/brain/chat_out", self._chat_out_cb, 10)
@@ -1483,6 +1486,34 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
 
     asyncio.create_task(brain_chat_drainer())
 
+    # Yellow skill nav-state bridge — receives /yellow/nav_state from the
+    # skill process and broadcasts it to all dashboard WebSocket clients.
+    yellow_nav_queue: asyncio.Queue = asyncio.Queue()
+
+    def _yellow_nav_bridge(msg) -> None:
+        """Thread-safe bridge from ROS callback to asyncio broadcast."""
+        try:
+            import json as _json  # noqa: PLC0415
+            payload = _json.loads(msg.data)
+            loop.call_soon_threadsafe(yellow_nav_queue.put_nowait, payload)
+        except Exception:
+            pass
+
+    try:
+        from std_msgs.msg import String as _NavString  # noqa: PLC0415
+        node.create_subscription(_NavString, "/yellow/nav_state", _yellow_nav_bridge, 10)
+    except Exception:
+        pass
+
+    async def yellow_nav_drainer() -> None:
+        while True:
+            payload = await yellow_nav_queue.get()
+            response = str(payload.get("response") or "").strip()
+            if response:
+                await broadcast_status({"phase": "executing", "text": response})
+
+    asyncio.create_task(yellow_nav_drainer())
+
     def process_request(connection, request):
         """Return an HTTP Response for non-WebSocket requests (static files).
 
@@ -1546,6 +1577,14 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
                 elif msg.get("type") == "action":
                     text = str(msg.get("text", "")).strip()
                     node.get_logger().info(f"[CMD] received action: '{text}'")
+                    # Forward to Yellow skill's chat input topic.
+                    try:
+                        from std_msgs.msg import String as _String  # noqa: PLC0415
+                        _chat_msg = _String()
+                        _chat_msg.data = json.dumps({"text": text, "ts": msg.get("ts", 0)})
+                        node._yellow_chat_pub.publish(_chat_msg)
+                    except Exception:
+                        pass
                     if not text:
                         await ws.send(json.dumps({
                             "type": "status",

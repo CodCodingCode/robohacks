@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from typing import Literal
 
@@ -381,6 +382,75 @@ def _format_recon(data: dict) -> dict:
         result["mission_phase"] = "defuse"
 
     return result
+
+
+def analyze_yellow(
+    camera_b64: str,
+    lidar_b64: str,
+    chat_text: str = "",
+) -> dict:
+    """Call Gemini Flash 2.5 with camera + LiDAR images + optional chat context.
+
+    Intended for the Yellow skill's 10×/min VLM navigation loop.
+
+    Args:
+        camera_b64: Base64 JPEG from the front RGB camera.
+        lidar_b64:  Base64 JPEG of the top-down LiDAR polar visualisation.
+        chat_text:  Latest operator chat message (empty string if none).
+
+    Returns:
+        Dict with keys: analysis (str), navigation (dict with action/amount/rationale),
+        defuse_bomb (bool), response (str).  Always returns safe defaults on error.
+    """
+    from vlm.prompts import yellow_nav_prompt  # local import avoids circular load
+
+    _safe: dict = {
+        "analysis": "VLM unavailable",
+        "navigation": {"action": "stop", "amount": 0.0, "rationale": "fallback"},
+        "defuse_bomb": False,
+        "response": "",
+    }
+    try:
+        global _last_call
+        elapsed = time.time() - _last_call
+        if elapsed < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - elapsed)
+
+        client = _get_client()
+
+        camera_part = types.Part.from_bytes(
+            data=base64.b64decode(camera_b64), mime_type="image/jpeg"
+        )
+        lidar_part = types.Part.from_bytes(
+            data=base64.b64decode(lidar_b64), mime_type="image/jpeg"
+        )
+        text_part = types.Part.from_text(
+            "Image 1 = front camera. Image 2 = LiDAR scan. Analyse and navigate."
+        )
+
+        response = client.models.generate_content(
+            model=_MODEL,
+            contents=[camera_part, lidar_part, text_part],
+            config=types.GenerateContentConfig(
+                system_instruction=yellow_nav_prompt(chat_text),
+                temperature=0.2,
+                max_output_tokens=1024,
+            ),
+        )
+        _last_call = time.time()
+
+        raw = response.text.strip()
+        # Strip markdown fences if Gemini wraps the JSON.
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+
+        parsed = json.loads(raw)
+        return {**_safe, **parsed}
+
+    except Exception as exc:
+        if os.environ.get("VLM_DEBUG"):
+            print(f"[yellow VLM error] {exc}")
+        return _safe
 
 
 def _format_defusal(data: dict) -> dict:

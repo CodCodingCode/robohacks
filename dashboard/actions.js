@@ -109,6 +109,61 @@
         }
       });
     }
+
+    // Voice input via Web Speech API (Chrome / Edge).
+    const micBtn = document.getElementById("commands-mic");
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (micBtn && SR) {
+      const recog = new SR();
+      recog.lang = "en-US";
+      recog.interimResults = false;
+      recog.maxAlternatives = 1;
+      let listening = false;
+
+      micBtn.addEventListener("click", () => {
+        if (!listening) {
+          try {
+            recog.start();
+          } catch (e) {
+            appendLog("error", "Voice: could not start — " + e.message);
+            return;
+          }
+          micBtn.textContent = "REC";
+          micBtn.classList.add("btn-mic-active");
+          listening = true;
+        } else {
+          recog.stop();
+        }
+      });
+
+      recog.onresult = (e) => {
+        const text = e.results[0][0].transcript.trim();
+        if (!text) return;
+        if (!sendFn) {
+          appendLog("error", "Not connected — voice command not sent");
+          return;
+        }
+        sendFn({ type: "action", text, ts: Date.now() });
+        appendLog("user", "[voice] " + text);
+        setMeta("Sent (voice)");
+      };
+
+      recog.onend = () => {
+        listening = false;
+        micBtn.textContent = "MIC";
+        micBtn.classList.remove("btn-mic-active");
+      };
+
+      recog.onerror = (e) => {
+        appendLog("error", "Voice error: " + e.error);
+        listening = false;
+        micBtn.textContent = "MIC";
+        micBtn.classList.remove("btn-mic-active");
+      };
+    } else if (micBtn) {
+      micBtn.disabled = true;
+      micBtn.title = "Speech recognition not supported in this browser (use Chrome/Edge)";
+    }
   }
 
   function setSender(send) {
