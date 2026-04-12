@@ -39,9 +39,18 @@ import asyncio
 import json
 import math
 import mimetypes
+import sys
 import threading
 import time
 from pathlib import Path
+
+# Make the `vlm` and `slam` packages importable regardless of the current
+# working directory the launcher was started from. Without this, running the
+# node from e.g. /home/jetson1 instead of /home/jetson1/robohacks causes
+# `import vlm` to fail silently and the intel panel stays blank.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped

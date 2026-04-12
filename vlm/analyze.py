@@ -113,8 +113,8 @@ def ask_operator_question(image_b64: str, question: str) -> str:
 class VLMSession:
     """Wraps analyze_frame() with cross-frame state tracking.
 
-    Always stays in recon phase — no mode switching.  Threats are logged
-    in the result but never trigger a defusal phase change.
+    Tracks cumulative rooms and person detections. Phase switching is controlled
+    externally, so VLM results never trigger a defusal phase change directly.
 
     Usage in a skill:
 
@@ -140,10 +140,13 @@ class VLMSession:
         result = analyze_frame(image_b64, phase=self.phase)
         self.frame_count += 1
 
+        # Accumulate rooms across frames.
         for room in result.get("rooms", []):
             key = room.get("type", "Unknown")
             self.rooms_seen[key] = room
 
+        # Never auto-switch phase — operator controls mode manually.
+        # Strip any phase/defusal changes the VLM tries to make.
         result.pop("defusal", None)
         result.pop("mission_phase", None)
 
@@ -157,6 +160,7 @@ class VLMSession:
         result["evacuation_alert"] = people_count > 0 or len(person_annotations) > 0
         result["people_detected"] = max(people_count, len(person_annotations))
 
+        # Include cumulative rooms (all rooms seen so far, not just this frame).
         result["rooms_cumulative"] = list(self.rooms_seen.values())
 
         return result
