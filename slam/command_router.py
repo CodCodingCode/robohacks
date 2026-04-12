@@ -185,9 +185,37 @@ class ReconCommandRouter:
             return True
         if route.kind == "approach_target":
             if node is not None:
+                # Check persistent marker store for a remembered location.
+                marker = node.find_marker_by_label(route.target)
+                if marker is not None:
+                    x, y = marker["x"], marker["y"]
+                    nav2_sent = node.navigate_to_pose(x, y)
+                    if nav2_sent:
+                        await self._broadcast({
+                            "phase": "navigating",
+                            "text": (
+                                f"→ navigating to remembered {route.target}"
+                                f" at ({x:.1f}, {y:.1f})"
+                            ),
+                        })
+                        return True
+                    # Nav2 unavailable — fall back to VLM spin-search.
+                    node.activate_agent("recon_agent")
+                    node.publish_chat_in(
+                        f"Call recon_movement skill with action=find_object"
+                        f" and target={route.target} and max_duration_s=90"
+                    )
+                    await self._broadcast({
+                        "phase": "planning",
+                        "text": (
+                            f"→ remembered {route.target} at ({x:.1f}, {y:.1f})"
+                            f" but Nav2 unavailable — searching visually"
+                        ),
+                    })
+                    return True
+
+                # No marker found — use existing VLM visual approach.
                 node.activate_agent("recon_agent")
-                # Send an explicit, unambiguous instruction so the PEAS agent
-                # calls approach_object without any conversational hesitation.
                 node.publish_chat_in(
                     f"Call recon_movement skill with action=approach_object and target={route.target}"
                 )

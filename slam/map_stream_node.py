@@ -59,6 +59,8 @@ from nav_msgs.srv import GetMap
 from sensor_msgs.msg import BatteryState, CameraInfo, Image, LaserScan
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from lifecycle_msgs.srv import ChangeState, GetState
+from lifecycle_msgs.msg import Transition
 try:
     from slam.depth_fusion import (
         camera_info_to_dict,
@@ -82,8 +84,8 @@ POSE_HZ = 10.0
 MAP_HZ = 1.0
 # LiDAR fallback when /map is empty.
 SCAN_HZ = 1.0
-# VLM analysis cadence — Gemini rate limit is 2s minimum.
-VLM_INTERVAL = 3.0
+# VLM analysis cadence — Gemini rate limit is 1s minimum.
+VLM_INTERVAL = 2.0
 SEMANTIC_MARKER_TTL = 8.0
 AUTONOMY_SWITCHING_ENABLED = False
 
@@ -107,6 +109,8 @@ class MapStreamNode(Node):
         # topic it came from. `None` until we see our first frame.
         self._pose: tuple[float, float, float] | None = None
         self._last_map: OccupancyGrid | None = None
+        self._last_map_stamp: float = 0.0  # ROS header stamp (seconds)
+        self._have_live_slam: bool = False  # True once dynamic_map responds
         self._last_scan: LaserScan | None = None
         self._battery_pct: float | None = None
         # Latest compressed camera frame (bytes) for VLM analysis.
@@ -230,6 +234,16 @@ class MapStreamNode(Node):
         self._map_poll_timer = self.create_timer(1.0, self._poll_map)
         self._map_poll_pending = False
 
+        # Auto-activate slam_toolbox lifecycle node so it starts mapping.
+        self._slam_lifecycle_change = self.create_client(
+            ChangeState, "/slam_toolbox/change_state"
+        )
+        self._slam_lifecycle_get = self.create_client(
+            GetState, "/slam_toolbox/get_state"
+        )
+        self._slam_activated = False
+        self._slam_activate_timer = self.create_timer(2.0, self._try_activate_slam)
+
         msg = (
             "map_stream_node subscribed to /pose, /odom, /mapping_pose, /map, "
             "/battery_state, /scan, /mars/main_camera/left/image_raw"
@@ -324,10 +338,73 @@ class MapStreamNode(Node):
                 existing["depth_m"] = m.get("depth_m", existing.get("depth_m"))
                 existing["last_seen"] = m.get("last_seen", existing.get("last_seen"))
                 existing["source"] = m.get("source", existing.get("source"))
+            # Always update observation timestamp for TTL expiry.
+            self._persistent_markers[mid]["ts"] = time.time()
 
     def get_persistent_markers(self) -> list[dict]:
+        now = time.time()
         with self._lock:
+            # Expire markers older than 5 minutes.
+            stale = [k for k, v in self._persistent_markers.items()
+                     if now - v.get("ts", 0) > 300]
+            for k in stale:
+                del self._persistent_markers[k]
             return list(self._persistent_markers.values())
+
+    def find_marker_by_label(self, target: str) -> dict | None:
+        """Return the best-matching persistent marker for *target*, or None.
+
+        Uses the same fuzzy scoring as recon_movement (substring, token
+        overlap, plural stripping) so "plant" matches "potted plant".
+        """
+        from skills.recon_movement import _target_score  # noqa: PLC0415
+
+        markers = self.get_persistent_markers()
+        if not markers:
+            return None
+        scored = [
+            (_target_score(m.get("label", ""), target), m)
+            for m in markers
+        ]
+        scored = [(s, m) for s, m in scored if s > 0]
+        if not scored:
+            return None
+        # Best label match; break ties with most-recently-seen.
+        return max(scored, key=lambda item: (item[0], item[1].get("last_seen", 0)))[1]
+
+    def navigate_to_pose(self, x: float, y: float, theta: float = 0.0) -> bool:
+        """Send a Nav2 NavigateToPose goal.  Returns True if the goal was sent."""
+        try:
+            from rclpy.action import ActionClient          # noqa: PLC0415
+            from nav2_msgs.action import NavigateToPose     # noqa: PLC0415
+            from geometry_msgs.msg import PoseStamped       # noqa: PLC0415
+
+            if not hasattr(self, "_nav2_client"):
+                self._nav2_client = ActionClient(
+                    self, NavigateToPose, "/navigate_to_pose"
+                )
+
+            if not self._nav2_client.wait_for_server(timeout_sec=2.0):
+                self.get_logger().warn("Nav2 action server not available")
+                return False
+
+            goal = NavigateToPose.Goal()
+            goal.pose = PoseStamped()
+            goal.pose.header.frame_id = "map"
+            goal.pose.header.stamp = self.get_clock().now().to_msg()
+            goal.pose.pose.position.x = x
+            goal.pose.pose.position.y = y
+            goal.pose.pose.orientation.z = math.sin(theta / 2.0)
+            goal.pose.pose.orientation.w = math.cos(theta / 2.0)
+
+            self._nav2_client.send_goal_async(goal)
+            self.get_logger().info(
+                f"Nav2 goal sent: ({x:.2f}, {y:.2f}, θ={math.degrees(theta):.0f}°)"
+            )
+            return True
+        except Exception as e:
+            self.get_logger().warn(f"Nav2 goal failed: {e}")
+            return False
 
     def clear_persistent_markers(self) -> None:
         with self._lock:
@@ -377,6 +454,70 @@ class MapStreamNode(Node):
                 f"first pose from {source}: x={x:.3f} y={y:.3f} theta={theta:.3f}"
             )
 
+    def _try_activate_slam(self) -> None:
+        """Auto-activate slam_toolbox lifecycle node (configure → activate)."""
+        if self._slam_activated:
+            return
+        if not self._slam_lifecycle_change.service_is_ready():
+            self.get_logger().info("[SLAM-ACTIVATE] waiting for /slam_toolbox/change_state service...")
+            return
+        if not self._slam_lifecycle_get.service_is_ready():
+            return
+
+        # Check current state first
+        get_req = GetState.Request()
+        future = self._slam_lifecycle_get.call_async(get_req)
+        future.add_done_callback(self._on_slam_state_response)
+
+    def _on_slam_state_response(self, future) -> None:
+        try:
+            resp = future.result()
+        except Exception as e:
+            self.get_logger().warn(f"[SLAM-ACTIVATE] get_state failed: {e}")
+            return
+        state_id = resp.current_state.id
+        state_label = resp.current_state.label
+        self.get_logger().info(f"[SLAM-ACTIVATE] slam_toolbox state: {state_label} (id={state_id})")
+
+        if state_label == "active":
+            self._slam_activated = True
+            self.get_logger().info("[SLAM-ACTIVATE] slam_toolbox already active!")
+            return
+
+        # Determine which transition to send
+        if state_label == "unconfigured":
+            transition_id = Transition.TRANSITION_CONFIGURE
+            label = "configure"
+        elif state_label == "inactive":
+            transition_id = Transition.TRANSITION_ACTIVATE
+            label = "activate"
+        else:
+            self.get_logger().warn(f"[SLAM-ACTIVATE] unexpected state {state_label}, skipping")
+            return
+
+        req = ChangeState.Request()
+        req.transition = Transition()
+        req.transition.id = transition_id
+        self.get_logger().info(f"[SLAM-ACTIVATE] sending '{label}' transition...")
+        future = self._slam_lifecycle_change.call_async(req)
+        future.add_done_callback(
+            lambda f: self._on_slam_transition_done(f, label)
+        )
+
+    def _on_slam_transition_done(self, future, label: str) -> None:
+        try:
+            resp = future.result()
+        except Exception as e:
+            self.get_logger().warn(f"[SLAM-ACTIVATE] {label} failed: {e}")
+            return
+        if resp.success:
+            self.get_logger().info(f"[SLAM-ACTIVATE] '{label}' succeeded!")
+            if label == "activate":
+                self._slam_activated = True
+                self.get_logger().info("[SLAM-ACTIVATE] slam_toolbox is now ACTIVE — live mapping enabled")
+        else:
+            self.get_logger().warn(f"[SLAM-ACTIVATE] '{label}' returned success=False")
+
     def _pose_cov_cb(self, msg: PoseWithCovarianceStamped) -> None:
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
@@ -390,14 +531,28 @@ class MapStreamNode(Node):
         )
 
     def _map_cb(self, msg: OccupancyGrid) -> None:
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        w, h = msg.info.width, msg.info.height
         with self._lock:
+            # Once we have a live SLAM map from dynamic_map, completely
+            # ignore the /map topic — it's the stale navigation_map_server.
+            if self._have_live_slam:
+                self.get_logger().debug(
+                    f"[MAP-DEBUG] /map topic IGNORED (have live SLAM) — {w}x{h} stamp={stamp:.1f}"
+                )
+                return
+            self.get_logger().info(
+                f"[MAP-DEBUG] /map topic ACCEPTED (no live SLAM yet) — {w}x{h} stamp={stamp:.1f}"
+            )
             self._last_map = msg
+            self._last_map_stamp = stamp
 
     def _poll_map(self) -> None:
         """Timer callback: request the latest map from slam_toolbox."""
         if self._map_poll_pending:
             return
         if not self._dynamic_map_cli.service_is_ready():
+            self.get_logger().debug("[MAP-DEBUG] dynamic_map service NOT ready (slam_toolbox not active?)")
             return
         self._map_poll_pending = True
         future = self._dynamic_map_cli.call_async(GetMap.Request())
@@ -407,11 +562,24 @@ class MapStreamNode(Node):
         self._map_poll_pending = False
         try:
             resp = future.result()
-        except Exception:
+        except Exception as e:
+            self.get_logger().warn(f"[MAP-DEBUG] dynamic_map call failed: {e}")
             return
         if resp and resp.map and resp.map.info.width > 0:
+            stamp = resp.map.header.stamp.sec + resp.map.header.stamp.nanosec * 1e-9
+            w, h = resp.map.info.width, resp.map.info.height
+            was_live = self._have_live_slam
             with self._lock:
                 self._last_map = resp.map
+                self._last_map_stamp = stamp
+                self._have_live_slam = True
+            if not was_live:
+                self.get_logger().info(
+                    f"[MAP-DEBUG] LIVE SLAM map from dynamic_map! {w}x{h} stamp={stamp:.1f} — "
+                    "ignoring /map topic from now on"
+                )
+        else:
+            self.get_logger().debug("[MAP-DEBUG] dynamic_map returned empty/None")
 
     def _battery_cb(self, msg: BatteryState) -> None:
         if msg.percentage < 0.0:
@@ -494,7 +662,7 @@ class MapStreamNode(Node):
                 import json as _json
                 from std_msgs.msg import String as _String  # noqa: PLC0415
                 annotations = result.get("annotations", [])
-                if annotations and hasattr(self, "_vlm_annotations_pub"):
+                if hasattr(self, "_vlm_annotations_pub"):
                     payload = _json.dumps({"annotations": annotations, "ts": now})
                     self._vlm_annotations_pub.publish(_String(data=payload))
             except Exception:

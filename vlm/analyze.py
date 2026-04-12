@@ -34,7 +34,7 @@ from vlm.prompts import recon_prompt, defusal_prompt, operator_qa_prompt
 _MODEL = "gemini-2.5-flash"
 
 # Rate limiting: minimum seconds between Gemini calls.
-_MIN_INTERVAL = 2.0
+_MIN_INTERVAL = 1.0
 _last_call: float = 0.0
 
 # ---------------------------------------------------------------------------

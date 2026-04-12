@@ -120,18 +120,24 @@
     const viewMaxWX = viewport.centerWX + cssH / (2 * viewport.scale);
 
     const minCellX = Math.max(0, Math.floor((viewMinWX - ox) / res));
-    const maxCellX = Math.min(mapData.width - 1, Math.ceil((viewMaxWX - ox) / res));
+    const maxCellX = Math.min(
+      mapData.width - 1,
+      Math.ceil((viewMaxWX - ox) / res),
+    );
     const minCellY = Math.max(0, Math.floor((viewMinWY - oy) / res));
-    const maxCellY = Math.min(mapData.height - 1, Math.ceil((viewMaxWY - oy) / res));
+    const maxCellY = Math.min(
+      mapData.height - 1,
+      Math.ceil((viewMaxWY - oy) / res),
+    );
 
     for (let cy = minCellY; cy <= maxCellY; cy++) {
       for (let cx = minCellX; cx <= maxCellX; cx++) {
         const cell = mapData.data[cy * mapData.width + cx];
         if (cell === -1) continue;
         if (cell >= 50) {
-          ctx.fillStyle = "rgba(255,255,255,0.12)";
+          ctx.fillStyle = "rgba(255,255,255,0.35)";
         } else {
-          ctx.fillStyle = "rgba(255,255,255,0.03)";
+          ctx.fillStyle = "rgba(255,255,255,0.05)";
         }
         const wx = ox + cx * res;
         const wy = oy + cy * res;
@@ -278,7 +284,9 @@
         ? "rgba(255,59,59,0.08)"
         : "rgba(0,255,136,0.06)";
       ctx.fillRect(sx - 45, sy - 14, 90, 28);
-      ctx.strokeStyle = hasThreat ? "rgba(255,59,59,0.4)" : "rgba(0,255,136,0.25)";
+      ctx.strokeStyle = hasThreat
+        ? "rgba(255,59,59,0.4)"
+        : "rgba(0,255,136,0.25)";
       ctx.lineWidth = 0.5;
       ctx.strokeRect(sx - 45, sy - 14, 90, 28);
 
@@ -326,9 +334,15 @@
     ctx.strokeStyle = "rgba(40,75,201,0.25)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(toScreenX(trail[0].x, trail[0].y), toScreenY(trail[0].x, trail[0].y));
+    ctx.moveTo(
+      toScreenX(trail[0].x, trail[0].y),
+      toScreenY(trail[0].x, trail[0].y),
+    );
     for (let i = 1; i < trail.length; i++) {
-      ctx.lineTo(toScreenX(trail[i].x, trail[i].y), toScreenY(trail[i].x, trail[i].y));
+      ctx.lineTo(
+        toScreenX(trail[i].x, trail[i].y),
+        toScreenY(trail[i].x, trail[i].y),
+      );
     }
     ctx.stroke();
     ctx.restore();

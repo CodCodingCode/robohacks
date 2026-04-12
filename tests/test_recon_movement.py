@@ -1,5 +1,7 @@
 import math
+import time
 
+import skills.recon_movement as _rm
 from skills.recon_movement import (
     MAX_ANGULAR_SPEED_RADPS,
     MAX_COMMAND_DURATION_S,
@@ -258,3 +260,107 @@ def test_planner_cmd_vel_is_clamped_before_sending_to_mobility():
     assert skill.mobility.cmd_vel == [
         (MAX_FORWARD_SPEED_MPS, 0.4, MAX_COMMAND_DURATION_S)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit tests: verify approach uses cached VLM instead of blocking call
+# ---------------------------------------------------------------------------
+
+def _inject_vlm_cache(annotations, age_s=0.0):
+    """Populate the module-level VLM cache with test data."""
+    with _rm._vlm_cache_lock:
+        _rm._vlm_cache.update({
+            "annotations": annotations,
+            "ts": time.time() - age_s,
+        })
+
+
+def _clear_vlm_cache():
+    with _rm._vlm_cache_lock:
+        _rm._vlm_cache.clear()
+
+
+def test_approach_object_uses_cached_annotations_without_calling_analyzer():
+    call_count = 0
+
+    def analyzer(_image):
+        nonlocal call_count
+        call_count += 1
+        return {"annotations": []}
+
+    skill = make_skill(analyzer=analyzer)
+    skill.image = "fake-b64"
+
+    # Inject fresh cache with a centered target (small bbox → not arrived).
+    _inject_vlm_cache([
+        {"category": "object", "label": "bag of chips", "bbox": [450, 450, 550, 550]},
+    ])
+
+    try:
+        message, status = skill.execute(
+            "approach_object",
+            target="bag of chips",
+            max_duration_s=2.0,
+        )
+
+        # Skill should have used cache, never called the analyzer.
+        assert call_count == 0, f"Expected 0 analyzer calls, got {call_count}"
+        # Should still drive toward the target.
+        movement = skill.mobility.cmd_vel[:-1]
+        assert movement
+    finally:
+        _clear_vlm_cache()
+
+
+def test_find_and_approach_uses_cached_annotations():
+    call_count = 0
+
+    def analyzer(_image):
+        nonlocal call_count
+        call_count += 1
+        return {"annotations": []}
+
+    skill = make_skill(analyzer=analyzer)
+    skill.image = "fake-b64"
+
+    # Inject fresh cache with the target visible.
+    _inject_vlm_cache([
+        {"category": "object", "label": "chair", "bbox": [450, 450, 550, 550]},
+    ])
+
+    try:
+        message, status = skill.execute(
+            "find_object",
+            target="chair",
+            max_duration_s=2.0,
+        )
+
+        assert call_count == 0, f"Expected 0 analyzer calls, got {call_count}"
+    finally:
+        _clear_vlm_cache()
+
+
+def test_approach_falls_back_to_analyzer_when_cache_empty():
+    call_count = 0
+
+    def analyzer(_image):
+        nonlocal call_count
+        call_count += 1
+        return {
+            "annotations": [
+                {"category": "object", "label": "box", "bbox": [450, 450, 550, 550]},
+            ],
+        }
+
+    skill = make_skill(analyzer=analyzer)
+    skill.image = "fake-b64"
+    _clear_vlm_cache()
+
+    message, status = skill.execute(
+        "approach_object",
+        target="box",
+        max_duration_s=2.0,
+    )
+
+    # With no cache, should have called the analyzer (cold start fallback).
+    assert call_count > 0

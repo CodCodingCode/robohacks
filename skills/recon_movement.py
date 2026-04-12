@@ -454,12 +454,18 @@ class ReconMovementSkill(Skill):
                 return f"Search for {target} cancelled", SkillResult.CANCELLED
 
             # Think Slow: check if target is visible.
-            image_b64 = self.image
-            if not image_b64:
-                self._stop()
-                return f"No camera frame available to search for {target}", SkillResult.FAILURE
-
-            result = self._analyze_frame(image_b64)
+            # Prefer cached annotations from the background VLM thread to
+            # avoid blocking the search loop with synchronous Gemini calls.
+            cached = _get_cached_annotations(max_age_s=8.0)
+            if cached is not None:
+                result = {"annotations": cached}
+            else:
+                # Cold start fallback: cache never populated yet.
+                image_b64 = self.image
+                if not image_b64:
+                    self._stop()
+                    return f"No camera frame available to search for {target}", SkillResult.FAILURE
+                result = self._analyze_frame(image_b64)
             annotation = _find_target_annotation(result.get("annotations", []), target)
 
             if annotation is not None:
@@ -509,7 +515,6 @@ class ReconMovementSkill(Skill):
         DRIVE_BURSTS = 3
 
         remaining = max_duration
-        first_iteration = True
 
         while remaining > 0.0:
             if self._cancelled:
@@ -517,18 +522,14 @@ class ReconMovementSkill(Skill):
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
             # ── THINK SLOW: perception frame ──────────────────────────────
-            # On the first iteration, try the shared pre-computed annotations
-            # from map_stream_node (published every ~3s to /recon/vlm_annotations).
-            # This avoids a 3-second blocking Gemini call when the dashboard
-            # VLM has already found the target in the current frame.
-            result: dict = {}
-            if first_iteration:
-                cached = _get_cached_annotations(max_age_s=4.0)
-                if cached is not None:
-                    result = {"annotations": cached}
-                first_iteration = False
-
-            if not result:
+            # Always prefer cached annotations from the background VLM thread
+            # (published every ~2s to /recon/vlm_annotations) to avoid
+            # blocking the approach loop with synchronous Gemini calls.
+            cached = _get_cached_annotations(max_age_s=8.0)
+            if cached is not None:
+                result = {"annotations": cached}
+            else:
+                # Cold start fallback: cache never populated yet.
                 image_b64 = self.image
                 if not image_b64:
                     self._stop()
