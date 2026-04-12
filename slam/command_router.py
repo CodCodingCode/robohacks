@@ -195,7 +195,8 @@ class MapStreamMobilityAdapter:
                 self._stop_event.set()
                 return
             time.sleep(0.1)
-        self._publish(0.0, 0.0)
+        # No trailing stop — the next send_cmd_vel or explicit _stop() handles it.
+        # Stopping here caused deceleration jitter between every step.
 
 
 # ---------------------------------------------------------------------------

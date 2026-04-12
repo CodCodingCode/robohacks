@@ -748,7 +748,7 @@ class ReconMovementSkill(Skill):
                     self.mobility.send_cmd_vel(
                         0.0, SEARCH_SPIN_SPEED_RADPS, min(1.0, remaining)
                     )
-                self._sleep(STEP_S)
+                # No _sleep — send_cmd_vel already blocks for the duration
                 remaining -= STEP_S
                 continue
 
@@ -815,7 +815,7 @@ class ReconMovementSkill(Skill):
                 _publish_approach_state(bbox, depth, bearing, "driving", fwd)
 
             self.mobility.send_cmd_vel(linear_x, angular_z, dur)
-            self._sleep(dur)
+            # No _sleep — send_cmd_vel already blocks for the duration
             remaining -= dur
 
         self._stop()
