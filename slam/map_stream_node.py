@@ -84,6 +84,7 @@ SCAN_HZ = 0.5
 # VLM analysis cadence — Gemini rate limit is 2s minimum.
 VLM_INTERVAL = 3.0
 SEMANTIC_MARKER_TTL = 8.0
+AUTONOMY_SWITCHING_ENABLED = False
 
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
@@ -290,6 +291,9 @@ class MapStreamNode(Node):
     # -- Autonomy --------------------------------------------------------
 
     def set_autonomy(self, enabled: bool) -> None:
+        if enabled and not AUTONOMY_SWITCHING_ENABLED:
+            self.get_logger().info("autonomy enable ignored: autonomous switching disabled")
+            return
         with self._lock:
             self._autonomy_enabled = enabled
         self.get_logger().info(f"autonomy {'ENABLED' if enabled else 'DISABLED'}")
@@ -399,6 +403,8 @@ class MapStreamNode(Node):
             return "No command entered", True
 
         if command in {"autonomy on", "enable autonomy", "auto on"}:
+            if not AUTONOMY_SWITCHING_ENABLED:
+                return "Autonomous switching is disabled; use manual commands", True
             self.set_autonomy(True)
             return "Autonomy enabled", False
         if command in {"autonomy off", "disable autonomy", "auto off"}:
@@ -786,7 +792,14 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 except Exception:
                     continue
                 if msg.get("cmd") == "set_autonomy":
-                    node.set_autonomy(bool(msg.get("enabled", False)))
+                    enabled = bool(msg.get("enabled", False))
+                    node.set_autonomy(enabled)
+                    if enabled and not AUTONOMY_SWITCHING_ENABLED:
+                        await ws.send(json.dumps({
+                            "type": "status",
+                            "phase": "error",
+                            "text": "Autonomous switching is disabled; use manual commands",
+                        }))
                 elif msg.get("cmd") == "defusal_action":
                     action = str(msg.get("action", "")).strip()
                     if action:
