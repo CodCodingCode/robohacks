@@ -76,6 +76,70 @@ def _get_min_forward_m() -> float | None:
 
 _OBSTACLE_STOP_M = 0.45   # stop driving if obstacle closer than this
 
+
+# ---------------------------------------------------------------------------
+# Shared VLM annotations cache (published by map_stream_node)
+# ---------------------------------------------------------------------------
+# map_stream_node publishes /recon/vlm_annotations (latched) after every
+# Gemini call.  We subscribe once at module load and keep the latest result
+# so approach_object can use the already-computed annotations on its first
+# iteration instead of making a blocking 3-second Gemini call.
+
+_vlm_cache_lock = threading.Lock()
+_vlm_cache: dict = {}          # {"annotations": [...], "ts": float}
+_vlm_cache_node = None
+
+def _try_start_vlm_cache_subscriber() -> None:
+    global _vlm_cache_node
+    if _vlm_cache_node is not None:
+        return
+    try:
+        import json as _json                     # noqa: PLC0415
+        import rclpy                             # noqa: PLC0415
+        from std_msgs.msg import String          # noqa: PLC0415
+        from rclpy.qos import (                  # noqa: PLC0415
+            QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy,
+        )
+
+        if not rclpy.ok():
+            return
+
+        node = rclpy.create_node("recon_movement_vlm_cache")
+        qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+
+        def _cb(msg: String) -> None:
+            try:
+                data = _json.loads(msg.data)
+                with _vlm_cache_lock:
+                    _vlm_cache.update(data)
+            except Exception:
+                pass
+
+        node.create_subscription(String, "/recon/vlm_annotations", _cb, qos)
+        t = threading.Thread(
+            target=lambda: rclpy.spin(node),
+            daemon=True,
+            name="recon_vlm_cache_spin",
+        )
+        t.start()
+        _vlm_cache_node = node
+    except Exception:
+        pass
+
+
+def _get_cached_annotations(max_age_s: float = 4.0) -> list | None:
+    """Return pre-computed VLM annotations if fresh enough, else None."""
+    _try_start_vlm_cache_subscriber()
+    with _vlm_cache_lock:
+        ts = _vlm_cache.get("ts", 0.0)
+        if time.time() - ts <= max_age_s:
+            return list(_vlm_cache.get("annotations", []))
+    return None
+
 from vlm.planner import Planner, RobotCommand, bbox_to_bearing
 
 try:
@@ -392,19 +456,32 @@ class ReconMovementSkill(Skill):
         DRIVE_BURSTS = 3
 
         remaining = max_duration
+        first_iteration = True
 
         while remaining > 0.0:
             if self._cancelled:
                 self._stop()
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
-            # ── THINK SLOW: fresh VLM frame ───────────────────────────────
-            image_b64 = self.image
-            if not image_b64:
-                self._stop()
-                return f"No camera frame available to approach {target}", SkillResult.FAILURE
+            # ── THINK SLOW: perception frame ──────────────────────────────
+            # On the first iteration, try the shared pre-computed annotations
+            # from map_stream_node (published every ~3s to /recon/vlm_annotations).
+            # This avoids a 3-second blocking Gemini call when the dashboard
+            # VLM has already found the target in the current frame.
+            result: dict = {}
+            if first_iteration:
+                cached = _get_cached_annotations(max_age_s=4.0)
+                if cached is not None:
+                    result = {"annotations": cached}
+                first_iteration = False
 
-            result = self._analyze_frame(image_b64)
+            if not result:
+                image_b64 = self.image
+                if not image_b64:
+                    self._stop()
+                    return f"No camera frame available to approach {target}", SkillResult.FAILURE
+                result = self._analyze_frame(image_b64)
+
             annotation = get_annotation(result)
 
             if annotation is None:

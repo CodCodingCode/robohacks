@@ -154,6 +154,18 @@ class MapStreamNode(Node):
         # /defusal_action publisher — operator wire-cut / switch commands.
         self._defusal_action_pub = self.create_publisher(String, "/defusal_action", 10)
 
+        # Shared VLM annotations — skills read pre-computed results from here
+        # instead of making their own blocking Gemini calls.
+        from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy  # noqa: PLC0415
+        _latched_qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+        self._vlm_annotations_pub = self.create_publisher(
+            String, "/recon/vlm_annotations", _latched_qos
+        )
+
         # Brain agent chat bridge — dashboard commands → PEAS cloud agent.
         self._chat_in_pub = self.create_publisher(String, "/brain/chat_in", 10)
         self._set_directive_pub = self.create_publisher(String, "/brain/set_directive", 10)
@@ -445,6 +457,17 @@ class MapStreamNode(Node):
         with self._lock:
             self._vlm_result = result
             self._vlm_result_ts = now
+            # Publish fresh annotations to the shared ROS topic so skills can
+            # read the pre-computed VLM result instead of calling Gemini inline.
+            try:
+                import json as _json
+                from std_msgs.msg import String as _String  # noqa: PLC0415
+                annotations = result.get("annotations", [])
+                if annotations and hasattr(self, "_vlm_annotations_pub"):
+                    payload = _json.dumps({"annotations": annotations, "ts": now})
+                    self._vlm_annotations_pub.publish(_String(data=payload))
+            except Exception:
+                pass
             annotations = result.get("annotations", [])
             depth_m = self._last_depth_m
             pose = self._pose
