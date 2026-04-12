@@ -46,12 +46,13 @@
     viewport.scale = minDim / 12;
   }
 
-  function toScreenX(wx) {
-    return cssW / 2 + (wx - viewport.centerWX) * viewport.scale;
+  function toScreenX(wx, wy) {
+    // 90° CCW rotation: screen-x maps from world +y
+    return cssW / 2 + (wy - viewport.centerWY) * viewport.scale;
   }
-  function toScreenY(wy) {
-    // Flip Y so +y world is up on screen.
-    return cssH / 2 - (wy - viewport.centerWY) * viewport.scale;
+  function toScreenY(wx, wy) {
+    // 90° CCW rotation: screen-y maps from world +x (flipped)
+    return cssH / 2 - (wx - viewport.centerWX) * viewport.scale;
   }
 
   function renderMap(state) {
@@ -101,18 +102,19 @@
     ctx.lineWidth = 1;
     ctx.beginPath();
 
-    const startWX = Math.floor(viewport.centerWX - cssW / (2 * viewport.scale));
-    const endWX = Math.ceil(viewport.centerWX + cssW / (2 * viewport.scale));
-    for (let wx = startWX; wx <= endWX; wx++) {
-      const sx = toScreenX(wx);
+    // After 90° CCW: vertical screen lines = world-Y, horizontal = world-X
+    const startWY = Math.floor(viewport.centerWY - cssW / (2 * viewport.scale));
+    const endWY = Math.ceil(viewport.centerWY + cssW / (2 * viewport.scale));
+    for (let wy = startWY; wy <= endWY; wy++) {
+      const sx = toScreenX(viewport.centerWX, wy);
       ctx.moveTo(sx + 0.5, 0);
       ctx.lineTo(sx + 0.5, cssH);
     }
 
-    const startWY = Math.floor(viewport.centerWY - cssH / (2 * viewport.scale));
-    const endWY = Math.ceil(viewport.centerWY + cssH / (2 * viewport.scale));
-    for (let wy = startWY; wy <= endWY; wy++) {
-      const sy = toScreenY(wy);
+    const startWX = Math.floor(viewport.centerWX - cssH / (2 * viewport.scale));
+    const endWX = Math.ceil(viewport.centerWX + cssH / (2 * viewport.scale));
+    for (let wx = startWX; wx <= endWX; wx++) {
+      const sy = toScreenY(wx, viewport.centerWY);
       ctx.moveTo(0, sy + 0.5);
       ctx.lineTo(cssW, sy + 0.5);
     }
@@ -129,11 +131,11 @@
     const oy = mapData.origin ? mapData.origin.y : 0;
     const cellPx = res * viewport.scale;
 
-    // Coarse culling: only draw cells whose world rect intersects viewport.
-    const viewMinWX = viewport.centerWX - cssW / (2 * viewport.scale);
-    const viewMaxWX = viewport.centerWX + cssW / (2 * viewport.scale);
-    const viewMinWY = viewport.centerWY - cssH / (2 * viewport.scale);
-    const viewMaxWY = viewport.centerWY + cssH / (2 * viewport.scale);
+    // Coarse culling: after 90° CCW, screen-X spans world-Y, screen-Y spans world-X.
+    const viewMinWY = viewport.centerWY - cssW / (2 * viewport.scale);
+    const viewMaxWY = viewport.centerWY + cssW / (2 * viewport.scale);
+    const viewMinWX = viewport.centerWX - cssH / (2 * viewport.scale);
+    const viewMaxWX = viewport.centerWX + cssH / (2 * viewport.scale);
 
     const minCellX = Math.max(0, Math.floor((viewMinWX - ox) / res));
     const maxCellX = Math.min(
@@ -157,8 +159,8 @@
         }
         const wx = ox + cx * res;
         const wy = oy + cy * res;
-        const sx = toScreenX(wx);
-        const sy = toScreenY(wy + res); // top-left on screen (flipped Y)
+        const sx = toScreenX(wx, wy);
+        const sy = toScreenY(wx, wy + res); // top-left on screen
         ctx.fillRect(sx, sy, Math.ceil(cellPx) + 1, Math.ceil(cellPx) + 1);
       }
     }
@@ -177,7 +179,7 @@
       const worldAngle = angle + robotPose.theta;
       const wx = robotPose.x + r * Math.cos(worldAngle);
       const wy = robotPose.y + r * Math.sin(worldAngle);
-      ctx.fillRect(toScreenX(wx) - 1, toScreenY(wy) - 1, 2, 2);
+      ctx.fillRect(toScreenX(wx, wy) - 1, toScreenY(wx, wy) - 1, 2, 2);
     }
     ctx.restore();
   }
@@ -187,8 +189,8 @@
   function drawRadarBlips(targets) {
     const t = Date.now();
     for (const target of targets) {
-      const sx = toScreenX(target.x);
-      const sy = toScreenY(target.y);
+      const sx = toScreenX(target.x, target.y);
+      const sy = toScreenY(target.x, target.y);
       const confirmed = !!target.confirmed_by_vlm;
       const color = confirmed ? "#018786" : "#6200ee";
 
@@ -225,8 +227,8 @@
 
   function drawSemanticMarkers(markers) {
     for (const marker of markers) {
-      const sx = toScreenX(marker.x);
-      const sy = toScreenY(marker.y);
+      const sx = toScreenX(marker.x, marker.y);
+      const sy = toScreenY(marker.x, marker.y);
       const isThreat = marker.category === "threat";
 
       ctx.save();
@@ -255,8 +257,8 @@
 
   function drawRoomLabels(rooms) {
     for (const room of rooms) {
-      const sx = toScreenX(room.x);
-      const sy = toScreenY(room.y);
+      const sx = toScreenX(room.x, room.y);
+      const sy = toScreenY(room.x, room.y);
       const hasThreat = (room.threats || []).length > 0;
 
       ctx.fillStyle = hasThreat
@@ -280,8 +282,8 @@
       }
 
       for (const threat of room.threats || []) {
-        const tx = toScreenX(threat.x);
-        const ty = toScreenY(threat.y);
+        const tx = toScreenX(threat.x, threat.y);
+        const ty = toScreenY(threat.x, threat.y);
         ctx.save();
         ctx.fillStyle = "#b00020";
         ctx.font = "18px sans-serif";
@@ -311,21 +313,21 @@
     ctx.strokeStyle = "rgba(98, 0, 238, 0.22)";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(toScreenX(trail[0].x), toScreenY(trail[0].y));
+    ctx.moveTo(toScreenX(trail[0].x, trail[0].y), toScreenY(trail[0].x, trail[0].y));
     for (let i = 1; i < trail.length; i++) {
-      ctx.lineTo(toScreenX(trail[i].x), toScreenY(trail[i].y));
+      ctx.lineTo(toScreenX(trail[i].x, trail[i].y), toScreenY(trail[i].x, trail[i].y));
     }
     ctx.stroke();
     ctx.restore();
   }
 
   function drawRobot(pose) {
-    const sx = toScreenX(pose.x);
-    const sy = toScreenY(pose.y);
+    const sx = toScreenX(pose.x, pose.y);
+    const sy = toScreenY(pose.x, pose.y);
     ctx.save();
     ctx.translate(sx, sy);
-    // Negate theta because screen Y is flipped.
-    ctx.rotate(-pose.theta);
+    // 90° CCW rotation applied to view, so rotate heading to match.
+    ctx.rotate(-pose.theta - Math.PI / 2);
 
     // Heading wedge.
     ctx.fillStyle = "rgba(98, 0, 238, 0.12)";
