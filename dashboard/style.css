@@ -416,12 +416,10 @@ html.recon-dark body {
 .bottom-row {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 1fr;
-  grid-template-rows: auto auto 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 0;
   min-height: 0;
   border-top: 0.5px solid var(--border);
-  overflow-y: auto;
 }
 
 /* ===================== SLAM MAP ===================== */
@@ -531,7 +529,7 @@ html.recon-dark body {
 
 .panel-telemetry {
   min-height: 0;
-  border-bottom: 0.5px solid var(--border);
+  border-right: 0.5px solid var(--border);
 }
 
 .telemetry-feed {
@@ -616,19 +614,22 @@ html.recon-dark body {
 
 .panel-radar {
   min-height: 0;
-  border-bottom: 0.5px solid var(--border);
+  border-right: 0.5px solid var(--border);
 }
 
 .radar-inner {
   flex: 1;
   display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
 
 #radar-scope {
-  flex: 0 0 200px;
+  flex: 1;
+  width: 100%;
   height: 100%;
+  display: block;
   background: var(--bg-base);
 }
 
