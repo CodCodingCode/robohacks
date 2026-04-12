@@ -153,27 +153,49 @@ def _extract_approach_target(command: str) -> str:
 # ---------------------------------------------------------------------------
 
 class MapStreamMobilityAdapter:
-    """Bridges ReconMovementSkill.send_cmd_vel → node.publish_twist."""
+    """Bridges ReconMovementSkill.send_cmd_vel → dedicated /cmd_vel publisher.
 
-    def __init__(self, node: Any, stop_event: threading.Event) -> None:
+    Uses a dedicated rclpy node + SingleThreadedExecutor so it is safe to call
+    from any background thread for as long as needed, independent of
+    map_stream_node's executor lifecycle.
+    """
+
+    def __init__(self, node: Any, stop_event: threading.Event,
+                 cmd_vel_pub=None, cmd_vel_lock: threading.Lock | None = None) -> None:
         self._node = node
         self._stop_event = stop_event
+        self._cmd_vel_pub = cmd_vel_pub
+        self._cmd_vel_lock = cmd_vel_lock or threading.Lock()
+
+    def _publish(self, linear_x: float, angular_z: float) -> bool:
+        """Publish one Twist. Returns False if the publisher is unavailable."""
+        if self._cmd_vel_pub is not None:
+            try:
+                from geometry_msgs.msg import Twist  # noqa: PLC0415
+                twist = Twist()
+                twist.linear.x = float(linear_x)
+                twist.angular.z = float(angular_z)
+                with self._cmd_vel_lock:
+                    self._cmd_vel_pub.publish(twist)
+                return True
+            except Exception:
+                pass
+        # Fallback to node's publisher if dedicated one isn't ready.
+        try:
+            self._node.publish_twist(linear_x, angular_z)
+            return True
+        except Exception:
+            return False
 
     def send_cmd_vel(self, linear_x: float, angular_z: float, duration: float) -> None:
         duration = max(0.0, min(float(duration), 3.0))
         deadline = time.time() + duration
         while time.time() < deadline and not self._stop_event.is_set():
-            try:
-                self._node.publish_twist(linear_x, angular_z)
-            except Exception:
-                # Publisher context invalid (node reset/restarted) — stop cleanly.
+            if not self._publish(linear_x, angular_z):
                 self._stop_event.set()
                 return
             time.sleep(0.1)
-        try:
-            self._node.publish_twist(0.0, 0.0)
-        except Exception:
-            pass
+        self._publish(0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +208,30 @@ class ReconCommandRouter:
         self._broadcast = broadcast
         self._stop_event = threading.Event()
         self._task: asyncio.Task | None = None
+        self._cmd_vel_pub = None
+        self._cmd_vel_lock = threading.Lock()
+        self._init_cmd_vel_pub()
+
+    def _init_cmd_vel_pub(self) -> None:
+        """Create a dedicated rclpy node + SingleThreadedExecutor for /cmd_vel.
+
+        Isolated from map_stream_node's executor so it can publish safely from
+        any background thread without context conflicts.
+        """
+        try:
+            import rclpy                                        # noqa: PLC0415
+            from rclpy.executors import SingleThreadedExecutor  # noqa: PLC0415
+            from geometry_msgs.msg import Twist                 # noqa: PLC0415
+            if not rclpy.ok():
+                return
+            _node = rclpy.create_node("recon_approach_cmd_vel")
+            self._cmd_vel_pub = _node.create_publisher(Twist, "/cmd_vel", 10)
+            _exe = SingleThreadedExecutor()
+            _exe.add_node(_node)
+            threading.Thread(target=_exe.spin, daemon=True,
+                             name="recon_cmd_vel_spin").start()
+        except Exception:
+            pass  # rclpy unavailable or already shut down
 
     async def handle(self, text: str, node: Any = None) -> bool:
         route = route_command(text)
@@ -304,7 +350,11 @@ class ReconCommandRouter:
                 analyzer=lambda _img: self._node.get_vlm_result() or {},
                 sleeper=self._sleep,
             )
-            skill.mobility = MapStreamMobilityAdapter(self._node, self._stop_event)
+            skill.mobility = MapStreamMobilityAdapter(
+                self._node, self._stop_event,
+                cmd_vel_pub=self._cmd_vel_pub,
+                cmd_vel_lock=self._cmd_vel_lock,
+            )
             skill.image = self._node.get_image_b64()
             return skill.execute(
                 "approach_object",

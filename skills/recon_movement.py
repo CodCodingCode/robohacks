@@ -432,7 +432,7 @@ class ReconMovementSkill(Skill):
         self._planner = planner or Planner()
         self._sleep = sleeper
         self._cancelled = False
-        self._search_dir: int = 1   # alternates ±1 each re-acquire spin
+        self._search_dir: int = 0   # consecutive miss counter; resets on annotation found
 
     @property
     def name(self) -> str:
@@ -728,18 +728,30 @@ class ReconMovementSkill(Skill):
             annotation = get_annotation(result)
 
             if annotation is None:
-                # Target not visible — alternate spin direction to search.
-                self._feedback(f"Searching for {target}")
-                self._search_dir *= -1
-                dur = min(1.5, remaining)
-                _publish_approach_state([], None, 0.0, "searching", _get_min_forward_m())
-                self.mobility.send_cmd_vel(
-                    0.0, SEARCH_SPIN_SPEED_RADPS * self._search_dir, dur
-                )
-                self._sleep(dur)
-                remaining -= dur
+                # VLM gap (Gemini cycle latency) — coast forward at half speed
+                # so the robot keeps making progress toward where the target was.
+                # Oscillating ±spin returns to the same heading and achieves nothing.
+                self._search_dir += 1
+                if self._search_dir <= 2:
+                    # First 2 misses: coast forward
+                    self._feedback(f"VLM gap — coasting toward {target}")
+                    _publish_approach_state([], None, 0.0, "searching", _get_min_forward_m())
+                    self.mobility.send_cmd_vel(
+                        self._planner.APPROACH_SPEED * 0.5, 0.0, STEP_S
+                    )
+                else:
+                    # After 3+ misses: short spin to look around, then reset counter
+                    self._feedback(f"Searching for {target}")
+                    self._search_dir = 0
+                    _publish_approach_state([], None, 0.0, "searching", _get_min_forward_m())
+                    self.mobility.send_cmd_vel(
+                        0.0, SEARCH_SPIN_SPEED_RADPS, min(1.0, remaining)
+                    )
+                self._sleep(STEP_S)
+                remaining -= STEP_S
                 continue
 
+            self._search_dir = 0  # reset miss counter — annotation found
             bbox = annotation.get("bbox")
             if not _valid_bbox(bbox):
                 remaining -= 0.1
