@@ -253,9 +253,8 @@ class ReconCommandRouter:
             from skills.recon_movement import ReconMovementSkill  # noqa: PLC0415
             import skills.recon_movement as _rm                   # noqa: PLC0415
 
-        # Inject the current VLM result directly into recon_movement's
-        # module-level annotation cache so the skill never tries to spin a
-        # new rclpy node (which conflicts with map_stream_node's executor).
+        # Inject current VLM annotations into module-level cache so the skill
+        # never tries to spin its own rclpy node (conflicts with map_stream_node).
         try:
             vlm_result = self._node.get_vlm_result() or {}
             annotations = vlm_result.get("annotations", [])
@@ -264,17 +263,48 @@ class ReconCommandRouter:
         except Exception:
             pass
 
-        skill = ReconMovementSkill(
-            analyzer=lambda _img: self._node.get_vlm_result() or {},
-            sleeper=self._sleep,
-        )
-        skill.mobility = MapStreamMobilityAdapter(self._node, self._stop_event)
-        skill.image = self._node.get_image_b64()
-        return skill.execute(
-            "approach_object",
-            target=target,
-            max_duration_s=90.0,
-        )
+        # Start a background thread that continuously syncs depth + camera_info
+        # from map_stream_node's already-running subscriptions into the skill's
+        # module-level depth cache, bypassing the duplicate rclpy subscriber.
+        depth_stop = threading.Event()
+
+        def _sync_depth():
+            while not depth_stop.is_set():
+                try:
+                    node_lock = getattr(self._node, "_lock", None)
+                    if node_lock is not None:
+                        with node_lock:
+                            depth_m = self._node._last_depth_m
+                            cam_info = self._node._camera_info
+                    else:
+                        depth_m = self._node._last_depth_m
+                        cam_info = self._node._camera_info
+                    if depth_m is not None:
+                        with _rm._depth_lock:
+                            _rm._depth_image = depth_m
+                            _rm._depth_cam_info = cam_info
+                except Exception:
+                    pass
+                time.sleep(0.05)  # sync at 20 Hz — matches OAK-D publish rate
+
+        depth_thread = threading.Thread(target=_sync_depth, daemon=True,
+                                        name="depth_sync")
+        depth_thread.start()
+
+        try:
+            skill = ReconMovementSkill(
+                analyzer=lambda _img: self._node.get_vlm_result() or {},
+                sleeper=self._sleep,
+            )
+            skill.mobility = MapStreamMobilityAdapter(self._node, self._stop_event)
+            skill.image = self._node.get_image_b64()
+            return skill.execute(
+                "approach_object",
+                target=target,
+                max_duration_s=90.0,
+            )
+        finally:
+            depth_stop.set()
 
     def _sleep(self, duration: float) -> None:
         deadline = time.time() + max(0.0, float(duration))
