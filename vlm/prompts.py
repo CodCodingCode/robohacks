@@ -57,8 +57,10 @@ def recon_prompt() -> tuple[str, str]:
         "\n"
         "Rules:\n"
         "- List every distinct room area visible in the frame.\n"
-        "- A threat is any item resembling an explosive device: exposed wires, timers, "
-        "packages with wires, pipe-like objects with attached electronics, etc.\n"
+        "- A threat is specifically a brown cardboard box approximately shoebox-sized "
+        "with electronics (e.g. a breadboard) and wires attached to the exterior top surface; "
+        "classify this as a bomb. Also flag any other item resembling an explosive device: "
+        "exposed wires, timers, packages with wires, pipe-like objects with attached electronics, etc.\n"
         "- If nothing suspicious is visible, threats should be an empty list and "
         "threat_detected should be false.\n"
         "- People count should only include clearly visible humans.\n"
@@ -74,7 +76,9 @@ def defusal_prompt() -> tuple[str, str]:
     """Wire-level analysis when a threat device is in view (arm camera)."""
     system = _JSON_PREAMBLE
     user = (
-        "You are looking at a suspected explosive device through the robot's arm camera.\n"
+        "You are looking at a suspected explosive device (a brown cardboard box approximately "
+        "shoebox-sized, with a breadboard and wires on its exterior top surface — classify this as a bomb) "
+        "through the robot's arm camera.\n"
         "\n"
         "Return JSON with this exact schema:\n"
         "{\n"

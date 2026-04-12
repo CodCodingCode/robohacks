@@ -443,14 +443,15 @@ class ReconMovementSkill(Skill):
             a search spin or after completing a burst of drive steps.
 
         Think Fast (P-controller + adaptive burst):
-            • angular_z = Kp × bearing  (curves toward target while moving)
+            • angular_z = -Kp × bearing (bbox bearing is positive to the right)
             • forward speed scaled down when bearing is large (pointing away)
             • burst duration capped to estimated remaining distance so the
               robot does not overshoot
             • angular correction decays across bursts (first burst corrects,
               later bursts drive straighter)
         """
-        # P-controller gain: angular_z = Kp * bearing
+        # P-controller gain. bbox_to_bearing returns positive for targets to
+        # the right in image space; cmd_vel.angular_z is positive left/CCW.
         Kp = 1.4
         # How many drive steps between VLM re-checks
         DRIVE_BURSTS = 3
@@ -517,9 +518,7 @@ class ReconMovementSkill(Skill):
 
             # ── THINK FAST: P-controller curved approach ──────────────────
             # Compute initial angular correction proportional to bearing error.
-            angular_z_full = _clamp(
-                Kp * bearing, -MAX_ANGULAR_SPEED_RADPS, MAX_ANGULAR_SPEED_RADPS
-            )
+            angular_z_full = _bearing_to_angular_z(bearing, gain=Kp)
             # Scale down forward speed when bearing is large (robot is sideways).
             # Minimum 40% speed so robot keeps moving while correcting.
             forward_scale = max(0.4, 1.0 - abs(bearing) / (math.pi / 3.0))
@@ -732,6 +731,11 @@ def _bbox_area(bbox) -> float:
     if not _valid_bbox(bbox):
         return 0.0
     return float((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+
+
+def _bearing_to_angular_z(bearing: float, gain: float = 1.0) -> float:
+    """Convert image-space bearing to cmd_vel angular velocity."""
+    return _clamp(-gain * bearing, -MAX_ANGULAR_SPEED_RADPS, MAX_ANGULAR_SPEED_RADPS)
 
 
 def _coerce_float(value: float, default: float) -> float:

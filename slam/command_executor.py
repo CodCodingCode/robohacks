@@ -243,7 +243,11 @@ class CommandExecutor:
 
     def _build_context(self) -> dict:
         """Snapshot everything the planner might want to ground the action."""
-        from slam.depth_fusion import bbox_bearing_rad, sample_depth_at_bbox
+        from slam.depth_fusion import (
+            assumed_depth_for_category,
+            bbox_bearing_rad,
+            sample_depth_at_bbox,
+        )
 
         pose, occ, _scan, bat = self.node.snapshot()
         vlm = self.node.get_vlm_result() or {}
@@ -280,18 +284,31 @@ class CommandExecutor:
         annotations = vlm.get("annotations", [])
         if annotations:
             enriched = []
-            img_width = (camera_info or {}).get("width", 1000)
+            img_width = (
+                depth_m.shape[1]
+                if depth_m is not None
+                else (camera_info or {}).get("width", 1000)
+            )
             for ann in annotations:
                 ann = dict(ann)
                 bbox = ann.get("bbox")
-                if bbox and depth_m is not None:
-                    d = sample_depth_at_bbox(depth_m, bbox)
+                if bbox:
+                    d = sample_depth_at_bbox(depth_m, bbox) if depth_m is not None else None
                     if d is not None:
                         ann["depth_m"] = round(d, 2)
-                if bbox:
+                        ann["depth_source"] = "depth_camera"
+                    elif ann.get("depth_m") is None:
+                        ann["depth_m"] = round(
+                            assumed_depth_for_category(ann.get("category", "object")),
+                            2,
+                        )
+                        ann["depth_source"] = "assumed_category"
+
                     bearing = bbox_bearing_rad(bbox, img_width, camera_info)
                     if bearing is not None:
-                        ann["bearing_rad"] = round(bearing, 3)
+                        # bbox_bearing_rad is positive for image-right; planner
+                        # rotate steps are positive left/CCW.
+                        ann["bearing_rad"] = round(-bearing, 3)
                 enriched.append(ann)
             ctx["annotations"] = enriched
 
@@ -313,9 +330,11 @@ class CommandExecutor:
             f"any single step ≤ {MAX_STEP_S} s, total plan ≤ {MAX_PLAN_S} s. "
             "Each annotation in the context may include 'bearing_rad' (angle from "
             "camera centre, negative = right, positive = left) and 'depth_m' "
-            "(distance in metres from the depth sensor). To navigate to a detected "
-            "object: rotate by its bearing_rad, then move forward by its depth_m "
-            "(minus ~0.5 m safety margin). "
+            "(distance in metres). 'depth_source' tells you whether depth_m came "
+            "from the depth camera or a category-based estimate; estimates are "
+            "rough, so use extra safety margin. To navigate to a detected object: "
+            "rotate by its bearing_rad, then move forward by its depth_m "
+            "(minus ~0.5 m safety margin, more for assumed depth). "
             "If the instruction is dangerous, unclear, or would exceed caps, "
             'return {"steps":[{"op":"stop"}],"rationale":"<why>"}. '
             "Respond with JSON ONLY matching: "

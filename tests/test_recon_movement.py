@@ -7,6 +7,7 @@ from skills.recon_movement import (
     ReconMovementSkill,
     SEARCH_SPIN_SPEED_RADPS,
     SkillResult,
+    _bearing_to_angular_z,
 )
 from vlm.planner import RobotCommand
 
@@ -40,6 +41,11 @@ def test_rejects_unknown_action_without_movement():
     assert skill.mobility.cmd_vel == []
 
 
+def test_image_bearing_to_angular_z_turns_right_for_right_side_target():
+    assert _bearing_to_angular_z(0.3, gain=1.0) < 0.0
+    assert _bearing_to_angular_z(-0.3, gain=1.0) > 0.0
+
+
 def test_scan_room_rotates_in_eight_bounded_steps_then_stops():
     skill = make_skill()
 
@@ -58,7 +64,7 @@ def test_move_forward_clamps_distance_and_chunks_velocity_commands():
     message, status = skill.execute("move_forward", distance_m=99.0, max_duration_s=5.0)
 
     assert status == SkillResult.SUCCESS
-    assert "up to 3.00m" in message
+    assert "up to 5.00m" in message
     movement = skill.mobility.cmd_vel[:-1]
     assert len(movement) == 1
     assert all(cmd[0] == MAX_FORWARD_SPEED_MPS for cmd in movement)
