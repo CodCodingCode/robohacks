@@ -87,6 +87,11 @@ class CommandExecutor:
     async def stop(self) -> None:
         """Abort the running plan (if any) and immediately zero /cmd_vel."""
         self._stop_event.set()
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
         try:
             self.node.publish_twist(0.0, 0.0)
         except Exception:

@@ -334,6 +334,8 @@ class MapStreamNode(Node):
         Returns None if depth data is unavailable or the region is invalid.
         """
         try:
+            import numpy as np
+
             with self._lock:
                 depth_m = self._last_depth_m
             if depth_m is None or depth_m.ndim != 2:
@@ -382,6 +384,14 @@ class MapStreamNode(Node):
         msg.data = action
         self._defusal_action_pub.publish(msg)
         self.get_logger().info(f"defusal action published: {action}")
+
+    def publish_twist(self, linear_x: float, angular_z: float) -> None:
+        from geometry_msgs.msg import Twist  # noqa: PLC0415
+
+        twist = Twist()
+        twist.linear.x = float(linear_x)
+        twist.angular.z = float(angular_z)
+        self._cmd_vel_pub.publish(twist)
 
     def handle_operator_command(self, text: str) -> tuple[str, bool]:
         command = " ".join(text.lower().replace("_", " ").split())
@@ -716,8 +726,31 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
     import websockets
     from websockets.asyncio.server import Response
     from websockets.datastructures import Headers
+    try:
+        from slam.command_executor import CommandExecutor
+    except ModuleNotFoundError as exc:  # pragma: no cover - script execution fallback.
+        if exc.name != "slam":
+            raise
+        from command_executor import CommandExecutor
 
     clients: set = set()
+
+    async def broadcast_status(status: dict) -> None:
+        payload = {"type": "status", **status}
+        if not clients:
+            return
+        encoded = json.dumps(payload)
+        stale = []
+        for client in list(clients):
+            try:
+                await client.send(encoded)
+            except Exception:
+                stale.append(client)
+        for client in stale:
+            clients.discard(client)
+
+    command_executor = CommandExecutor(node, broadcast_status)
+    await command_executor.start()
 
     def process_request(connection, request):
         """Return an HTTP Response for non-WebSocket requests (static files).
@@ -762,12 +795,47 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                     text = str(msg.get("text", "")).strip()
                     status, is_error = node.handle_operator_command(text)
                     await ws.send(json.dumps({
-                        "operator_command": {
-                            "text": text,
-                            "status": status,
-                            "error": is_error,
-                        }
+                        "type": "status",
+                        "phase": "error" if is_error else "done",
+                        "text": status,
                     }))
+                elif msg.get("type") == "action":
+                    text = str(msg.get("text", "")).strip()
+                    if not text:
+                        await ws.send(json.dumps({
+                            "type": "status",
+                            "phase": "error",
+                            "text": "empty command",
+                        }))
+                        continue
+
+                    command = " ".join(text.lower().replace("_", " ").split())
+                    if command in {"stop", "halt", "emergency stop", "e stop", "estop"}:
+                        node.set_autonomy(False)
+                        node.stop_manual_motion()
+                        await command_executor.stop()
+                        continue
+
+                    status, is_error = node.handle_operator_command(text)
+                    if not is_error:
+                        phase = (
+                            "executing"
+                            if status.startswith("Manual motion:")
+                            else "done"
+                        )
+                        await broadcast_status({"phase": phase, "text": status})
+                        continue
+                    if not status.startswith("Unknown command"):
+                        await broadcast_status({"phase": "error", "text": status})
+                        continue
+
+                    node.set_autonomy(False)
+                    node.stop_manual_motion()
+                    await command_executor.submit(text)
+                elif msg.get("type") == "stop":
+                    node.set_autonomy(False)
+                    node.stop_manual_motion()
+                    await command_executor.stop()
         finally:
             clients.discard(ws)
             node.get_logger().info(f"client disconnected ({len(clients)} total)")
