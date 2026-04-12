@@ -977,6 +977,10 @@ def run_planner_thread(node: MapStreamNode) -> None:
     state live and populates ``pending_cmd`` so the dashboard can show the
     operator what the robot *would* do next.
     """
+    if not AUTONOMY_SWITCHING_ENABLED:
+        print("[Planner] autonomous switching disabled — planner thread not started.")
+        return
+
     try:
         from vlm import Planner
     except ImportError:
