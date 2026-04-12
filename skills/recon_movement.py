@@ -74,7 +74,7 @@ def _get_min_forward_m() -> float | None:
         return _min_forward_m
 
 
-_OBSTACLE_STOP_M = 0.35   # stop driving if obstacle closer than this in narrow arc
+_OBSTACLE_STOP_M = 0.30   # stop driving if obstacle closer than this in narrow arc
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +625,7 @@ class ReconMovementSkill(Skill):
         # --- tunables --------------------------------------------------------
         STEP_S    = 0.4    # seconds per sensor step (short = frequent re-eval)
         ALIGN_TOL = 0.08   # rad (~4.5°) bearing dead-zone before driving
-        CLOSE_M   = 0.45   # depth-based stop distance (metres)
+        CLOSE_M   = 0.35   # depth-based stop distance (metres)
         Kp        = 1.4    # bearing → angular_z gain
         # ---------------------------------------------------------------------
 
