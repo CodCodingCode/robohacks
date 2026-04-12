@@ -1,5 +1,6 @@
 /*
- * telemetry.js — optional key/value rows (air quality, NFC, UART, etc.).
+ * telemetry.js — sensor card grid with sparkline placeholders.
+ * Renders a 2-column grid of cards; empty state shows dashed border message.
  */
 
 (function (global) {
@@ -11,25 +12,40 @@
       .replace(/"/g, "&quot;");
   }
 
+  function splitValueUnit(raw) {
+    const s = String(raw == null ? "—" : raw);
+    const match = s.match(/^([\d.\-+]+)\s*(.*)$/);
+    if (match) return { value: match[1], unit: match[2] || "" };
+    return { value: s, unit: "" };
+  }
+
   function renderTelemetry(rows, container) {
     if (!container) return;
     container.innerHTML = "";
+
     if (!rows || rows.length === 0) {
-      const p = document.createElement("div");
-      p.className = "telemetry-empty";
-      p.textContent = "NO AUX TELEMETRY";
-      container.appendChild(p);
+      const empty = document.createElement("div");
+      empty.className = "telemetry-empty";
+      empty.textContent = "NO AUX TELEMETRY";
+      container.appendChild(empty);
       return;
     }
+
     for (const row of rows) {
-      const div = document.createElement("div");
-      div.className = "telemetry-row";
+      const card = document.createElement("div");
+      card.className = "sensor-card";
+
       const label = row.label != null ? row.label : row.id || "—";
-      const value = row.value != null ? row.value : row.text || "—";
-      div.innerHTML = `
-        <span class="telemetry-label">${escapeHtml(label)}</span>
-        <span class="telemetry-value">${escapeHtml(value)}</span>`;
-      container.appendChild(div);
+      const rawValue = row.value != null ? row.value : row.text || "—";
+      const { value, unit } = splitValueUnit(rawValue);
+
+      card.innerHTML =
+        `<span class="sensor-card-label">${escapeHtml(label)}</span>` +
+        `<span class="sensor-card-value">${escapeHtml(value)}</span>` +
+        (unit ? `<span class="sensor-card-unit">${escapeHtml(unit)}</span>` : "") +
+        `<div class="sensor-card-sparkline"></div>`;
+
+      container.appendChild(card);
     }
   }
 

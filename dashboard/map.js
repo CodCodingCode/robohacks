@@ -1,15 +1,16 @@
 /*
- * map.js — tactical map canvas renderer.
+ * map.js — tactical map canvas renderer (v2 — Nothing design language).
  *
- * Layers (drawn in order, bottom to top):
- *   1. SLAM (occupancy grid OR raw lidar-scan fallback)
- *   2. Radar blips
- *   3. Depth-projected semantic markers and VLM room labels
- *   4. Robot triangle
+ * Layers (bottom to top):
+ *   1. Dot grid background
+ *   2. SLAM occupancy / lidar scan
+ *   3. Radar sweep (conic gradient arc)
+ *   4. Room labels + semantic markers
+ *   5. Radar blips
+ *   6. Robot + trail + pulse ring
  *
  * World → screen: world is metres with +y pointing up.
- * Viewport auto-fits a 10m x 10m area centered on the origin, then recenters
- * on the robot once we have a pose.
+ * 90° CCW rotation so screen-x = world-y, screen-y = -world-x.
  */
 
 (function (global) {
@@ -20,9 +21,9 @@
   let cssH = 0;
 
   const viewport = {
-    scale: 40, // pixels per metre
-    centerWX: 5, // world-x at screen center
-    centerWY: 5, // world-y at screen center
+    scale: 40,
+    centerWX: 5,
+    centerWY: 5,
   };
 
   function initMap(el) {
@@ -41,34 +42,31 @@
     canvas.width = Math.max(1, Math.floor(cssW * dpr));
     canvas.height = Math.max(1, Math.floor(cssH * dpr));
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // Recompute scale to fit ~12m across the shorter axis.
     const minDim = Math.min(cssW, cssH);
     viewport.scale = minDim / 12;
   }
 
   function toScreenX(wx, wy) {
-    // 90° CCW rotation: screen-x maps from world +y
     return cssW / 2 + (wy - viewport.centerWY) * viewport.scale;
   }
   function toScreenY(wx, wy) {
-    // 90° CCW rotation: screen-y maps from world +x (flipped)
     return cssH / 2 - (wx - viewport.centerWX) * viewport.scale;
   }
 
   function renderMap(state) {
     if (!ctx) return;
     if (state.robot) {
-      // Smoothly follow the robot.
       viewport.centerWX += (state.robot.x - viewport.centerWX) * 0.08;
       viewport.centerWY += (state.robot.y - viewport.centerWY) * 0.08;
     }
 
     ctx.clearRect(0, 0, cssW, cssH);
-    ctx.save();
-    ctx.fillStyle = "#fafafa";
+
+    // Dark base fill
+    ctx.fillStyle = "#0A0A0A";
     ctx.fillRect(0, 0, cssW, cssH);
-    ctx.restore();
-    drawGrid();
+
+    drawDotGrid();
 
     if (state.slam) {
       if (state.slam.map) {
@@ -78,89 +76,67 @@
       }
     }
 
+    if (state.robot) {
+      drawRadarSweep(state.robot);
+    }
+
     drawRoomLabels(state.rooms || []);
     drawSemanticMarkers(state.semantic_markers || []);
-    drawRadarBlips(
-      state.radar_targets_display || state.radar_targets || [],
-    );
+    drawRadarBlips(state.radar_targets_display || state.radar_targets || []);
 
     if (state.robot) {
-      drawRobot(state.robot);
       drawRobotTrail(state.robot);
+      drawRobot(state.robot);
     }
   }
 
-  /* --------------- Background grid --------------- */
+  /* --------------- Dot grid --------------- */
 
-  function drawGrid() {
-    const step = 1; // 1 metre grid
-    const stepPx = step * viewport.scale;
-    if (stepPx < 6) return;
-
+  function drawDotGrid() {
+    const step = 20; // pixels between dots
     ctx.save();
-    ctx.strokeStyle = "rgba(98, 0, 238, 0.06)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-
-    // After 90° CCW: vertical screen lines = world-Y, horizontal = world-X
-    const startWY = Math.floor(viewport.centerWY - cssW / (2 * viewport.scale));
-    const endWY = Math.ceil(viewport.centerWY + cssW / (2 * viewport.scale));
-    for (let wy = startWY; wy <= endWY; wy++) {
-      const sx = toScreenX(viewport.centerWX, wy);
-      ctx.moveTo(sx + 0.5, 0);
-      ctx.lineTo(sx + 0.5, cssH);
+    ctx.fillStyle = "rgba(40,75,201,0.18)";
+    for (let x = step / 2; x < cssW; x += step) {
+      for (let y = step / 2; y < cssH; y += step) {
+        ctx.beginPath();
+        ctx.arc(x, y, 0.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
-
-    const startWX = Math.floor(viewport.centerWX - cssH / (2 * viewport.scale));
-    const endWX = Math.ceil(viewport.centerWX + cssH / (2 * viewport.scale));
-    for (let wx = startWX; wx <= endWX; wx++) {
-      const sy = toScreenY(wx, viewport.centerWY);
-      ctx.moveTo(0, sy + 0.5);
-      ctx.lineTo(cssW, sy + 0.5);
-    }
-    ctx.stroke();
     ctx.restore();
   }
 
   /* --------------- SLAM: occupancy grid --------------- */
 
   function drawOccupancyGrid(mapData) {
-    // mapData: { width, height, resolution (m/cell), origin: {x, y}, data: Int8Array-like }
     const res = mapData.resolution || 0.1;
     const ox = mapData.origin ? mapData.origin.x : 0;
     const oy = mapData.origin ? mapData.origin.y : 0;
     const cellPx = res * viewport.scale;
 
-    // Coarse culling: after 90° CCW, screen-X spans world-Y, screen-Y spans world-X.
     const viewMinWY = viewport.centerWY - cssW / (2 * viewport.scale);
     const viewMaxWY = viewport.centerWY + cssW / (2 * viewport.scale);
     const viewMinWX = viewport.centerWX - cssH / (2 * viewport.scale);
     const viewMaxWX = viewport.centerWX + cssH / (2 * viewport.scale);
 
     const minCellX = Math.max(0, Math.floor((viewMinWX - ox) / res));
-    const maxCellX = Math.min(
-      mapData.width - 1,
-      Math.ceil((viewMaxWX - ox) / res),
-    );
+    const maxCellX = Math.min(mapData.width - 1, Math.ceil((viewMaxWX - ox) / res));
     const minCellY = Math.max(0, Math.floor((viewMinWY - oy) / res));
-    const maxCellY = Math.min(
-      mapData.height - 1,
-      Math.ceil((viewMaxWY - oy) / res),
-    );
+    const maxCellY = Math.min(mapData.height - 1, Math.ceil((viewMaxWY - oy) / res));
 
     for (let cy = minCellY; cy <= maxCellY; cy++) {
       for (let cx = minCellX; cx <= maxCellX; cx++) {
         const cell = mapData.data[cy * mapData.width + cx];
-        if (cell === -1) continue; // unknown: leave background showing
+        if (cell === -1) continue;
         if (cell >= 50) {
-          ctx.fillStyle = "#e0e0e0";
+          ctx.fillStyle = "rgba(255,255,255,0.12)";
         } else {
-          ctx.fillStyle = "#ffffff";
+          ctx.fillStyle = "rgba(255,255,255,0.03)";
         }
         const wx = ox + cx * res;
         const wy = oy + cy * res;
         const sx = toScreenX(wx, wy);
-        const sy = toScreenY(wx, wy + res); // top-left on screen
+        const sy = toScreenY(wx, wy + res);
         ctx.fillRect(sx, sy, Math.ceil(cellPx) + 1, Math.ceil(cellPx) + 1);
       }
     }
@@ -171,7 +147,7 @@
   function drawLidarScan(scan, robotPose) {
     if (!scan || !scan.ranges) return;
     ctx.save();
-    ctx.fillStyle = "#9e9e9e";
+    ctx.fillStyle = "rgba(40,75,201,0.35)";
     for (let i = 0; i < scan.ranges.length; i++) {
       const r = scan.ranges[i];
       if (!isFinite(r) || r <= 0 || r >= scan.range_max) continue;
@@ -184,6 +160,33 @@
     ctx.restore();
   }
 
+  /* --------------- Radar sweep --------------- */
+
+  function drawRadarSweep(robot) {
+    const sx = toScreenX(robot.x, robot.y);
+    const sy = toScreenY(robot.x, robot.y);
+    const radius = 8 * viewport.scale;
+    const t = Date.now();
+    const angle = ((t % 4000) / 4000) * Math.PI * 2;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(angle);
+
+    const sweepWidth = Math.PI / 3; // 60°
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, radius, -sweepWidth / 2, sweepWidth / 2);
+    ctx.closePath();
+
+    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+    grad.addColorStop(0, "rgba(40,75,201,0.18)");
+    grad.addColorStop(1, "rgba(40,75,201,0)");
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.restore();
+  }
+
   /* --------------- Radar blips --------------- */
 
   function drawRadarBlips(targets) {
@@ -192,34 +195,36 @@
       const sx = toScreenX(target.x, target.y);
       const sy = toScreenY(target.x, target.y);
       const confirmed = !!target.confirmed_by_vlm;
-      const color = confirmed ? "#018786" : "#6200ee";
+      const color = confirmed ? "#00FF88" : "#284bc9";
 
       ctx.save();
-      ctx.globalAlpha = Math.max(0.2, (target.confidence || 0.5) * 0.55);
+      ctx.globalAlpha = Math.max(0.2, (target.confidence || 0.5) * 0.6);
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.25;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(sx, sy, 22, 0, Math.PI * 2);
+      ctx.arc(sx, sy, 18, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
-      const pulse = 7 + Math.sin(t / 280 + target.id) * 2;
+      const pulse = 5 + Math.sin(t / 280 + target.id) * 1.5;
       ctx.save();
       ctx.fillStyle = color;
-      ctx.globalAlpha = confirmed ? 0.9 : 0.65;
+      ctx.globalAlpha = confirmed ? 0.85 : 0.55;
       ctx.beginPath();
       ctx.arc(sx, sy, pulse, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
-      ctx.fillStyle = "rgba(0,0,0,0.75)";
-      ctx.font = "500 11px Roboto, system-ui, sans-serif";
+      ctx.save();
+      ctx.fillStyle = "#888888";
+      ctx.font = "500 10px 'JetBrains Mono', monospace";
       ctx.textAlign = "left";
       ctx.fillText(
         `ID:${target.id}  ${Math.round((target.confidence || 0) * 100)}%`,
-        sx + 16,
-        sy - 14,
+        sx + 14,
+        sy - 10,
       );
+      ctx.restore();
     }
   }
 
@@ -232,23 +237,30 @@
       const isThreat = marker.category === "threat";
 
       ctx.save();
-      ctx.fillStyle = isThreat ? "#b00020" : "#018786";
-      ctx.strokeStyle = "rgba(255,255,255,0.85)";
-      ctx.lineWidth = 2;
+      ctx.fillStyle = isThreat ? "#FF3B3B" : "#00FF88";
       ctx.beginPath();
-      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+      ctx.arc(sx, sy, 4, 0, Math.PI * 2);
       ctx.fill();
-      ctx.stroke();
 
-      ctx.fillStyle = "rgba(0,0,0,0.78)";
-      ctx.fillRect(sx + 9, sy - 15, 112, 28);
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "500 11px Roboto, system-ui, sans-serif";
+      const labelText = String(marker.label || "object").slice(0, 16);
+      ctx.font = "500 10px 'JetBrains Mono', monospace";
+      const metrics = ctx.measureText(labelText);
+      const boxW = metrics.width + 12;
+      const boxH = marker.depth_m != null ? 28 : 18;
+
+      ctx.fillStyle = "rgba(10,10,10,0.85)";
+      ctx.fillRect(sx + 7, sy - 12, boxW, boxH);
+      ctx.strokeStyle = "rgba(255,255,255,0.07)";
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(sx + 7, sy - 12, boxW, boxH);
+
+      ctx.fillStyle = isThreat ? "#FF3B3B" : "#888888";
       ctx.textAlign = "left";
-      ctx.fillText(String(marker.label || "object").slice(0, 16), sx + 14, sy - 3);
+      ctx.fillText(labelText, sx + 13, sy + 1);
       if (marker.depth_m != null && isFinite(marker.depth_m)) {
-        ctx.font = "400 10px Roboto, system-ui, sans-serif";
-        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, sx + 14, sy + 10);
+        ctx.fillStyle = "#444444";
+        ctx.font = "400 9px 'JetBrains Mono', monospace";
+        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, sx + 13, sy + 12);
       }
       ctx.restore();
     }
@@ -261,36 +273,38 @@
       const sy = toScreenY(room.x, room.y);
       const hasThreat = (room.threats || []).length > 0;
 
+      ctx.save();
       ctx.fillStyle = hasThreat
-        ? "rgba(176, 0, 32, 0.08)"
-        : "rgba(3, 218, 198, 0.1)";
-      ctx.fillRect(sx - 50, sy - 16, 100, 32);
+        ? "rgba(255,59,59,0.08)"
+        : "rgba(0,255,136,0.06)";
+      ctx.fillRect(sx - 45, sy - 14, 90, 28);
+      ctx.strokeStyle = hasThreat ? "rgba(255,59,59,0.4)" : "rgba(0,255,136,0.25)";
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(sx - 45, sy - 14, 90, 28);
 
-      ctx.strokeStyle = hasThreat ? "#b00020" : "#018786";
-      ctx.lineWidth = 1;
-      ctx.strokeRect(sx - 50, sy - 16, 100, 32);
-
-      ctx.fillStyle = "#000000";
-      ctx.font = "500 12px Roboto, system-ui, sans-serif";
+      ctx.fillStyle = hasThreat ? "#FF3B3B" : "#888888";
+      ctx.font = "500 10px 'JetBrains Mono', monospace";
       ctx.textAlign = "center";
       ctx.fillText(String(room.type || "").toUpperCase(), sx, sy + 1);
 
       if (room.people && room.people > 0) {
-        ctx.fillStyle = "#6200ee";
-        ctx.font = "500 10px Roboto, system-ui, sans-serif";
-        ctx.fillText(`${room.people} people`, sx, sy + 13);
+        ctx.fillStyle = "#284bc9";
+        ctx.font = "400 9px 'JetBrains Mono', monospace";
+        ctx.fillText(`${room.people} people`, sx, sy + 12);
       }
 
       for (const threat of room.threats || []) {
         const tx = toScreenX(threat.x, threat.y);
         const ty = toScreenY(threat.x, threat.y);
         ctx.save();
-        ctx.fillStyle = "#b00020";
-        ctx.font = "18px sans-serif";
+        ctx.fillStyle = "#FF3B3B";
+        ctx.font = "600 14px 'JetBrains Mono', monospace";
         ctx.textAlign = "center";
-        ctx.fillText("!", tx, ty + 6);
+        ctx.fillText("!", tx, ty + 5);
         ctx.restore();
       }
+
+      ctx.restore();
     }
     ctx.textAlign = "left";
   }
@@ -301,7 +315,6 @@
   const TRAIL_MAX = 120;
 
   function drawRobotTrail(pose) {
-    // Append only when moved enough.
     const last = trail[trail.length - 1];
     if (!last || Math.hypot(last.x - pose.x, last.y - pose.y) > 0.05) {
       trail.push({ x: pose.x, y: pose.y });
@@ -310,8 +323,8 @@
     if (trail.length < 2) return;
 
     ctx.save();
-    ctx.strokeStyle = "rgba(98, 0, 238, 0.22)";
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(40,75,201,0.25)";
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(toScreenX(trail[0].x, trail[0].y), toScreenY(trail[0].x, trail[0].y));
     for (let i = 1; i < trail.length; i++) {
@@ -324,25 +337,40 @@
   function drawRobot(pose) {
     const sx = toScreenX(pose.x, pose.y);
     const sy = toScreenY(pose.x, pose.y);
+    const t = Date.now();
+
+    // Pulsing ring animation
+    const pulsePhase = (t % 2000) / 2000;
+    const ringScale = 1 + pulsePhase * 1.5;
+    const ringOpacity = 0.8 * (1 - pulsePhase);
+    if (ringOpacity > 0.01) {
+      ctx.save();
+      ctx.strokeStyle = "#284bc9";
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = ringOpacity;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 6 * ringScale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Heading wedge
     ctx.save();
     ctx.translate(sx, sy);
-    // 90° CCW rotation applied to view, so rotate heading to match.
     ctx.rotate(-pose.theta - Math.PI / 2);
-
-    // Heading wedge.
-    ctx.fillStyle = "rgba(98, 0, 238, 0.12)";
+    ctx.fillStyle = "rgba(40,75,201,0.12)";
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.arc(0, 0, 60, -0.4, 0.4);
+    ctx.arc(0, 0, 50, -0.4, 0.4);
     ctx.closePath();
     ctx.fill();
+    ctx.restore();
 
-    ctx.fillStyle = "#6200ee";
+    // Robot dot (filled cyan circle)
+    ctx.save();
+    ctx.fillStyle = "#284bc9";
     ctx.beginPath();
-    ctx.moveTo(12, 0);
-    ctx.lineTo(-8, -8);
-    ctx.lineTo(-8, 8);
-    ctx.closePath();
+    ctx.arc(sx, sy, 6, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }

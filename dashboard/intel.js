@@ -1,9 +1,6 @@
 /*
- * intel.js — rolling event log for VLM intel.
- *
- * Instead of re-rendering the full room list on every state update,
- * this appends new log entries only when something meaningful changes —
- * giving a live feed feel rather than a static snapshot.
+ * intel.js — rolling event ticker for VLM intel.
+ * Pushes short status strings to the HUD footer ticker.
  */
 
 (function (global) {
@@ -12,6 +9,7 @@
   let _lastThreats = "";
 
   const _tickerEl = () => document.getElementById("intel-ticker");
+  const _ellipsisEl = () => document.querySelector(".ellipsis-anim");
 
   function _plain(s) {
     return String(s == null ? "" : s)
@@ -27,6 +25,19 @@
     if (!el) return;
     el.textContent = _plain(text);
     el.classList.add("intel-ticker-active");
+
+    const dots = _ellipsisEl();
+    if (dots) dots.style.display = "none";
+  }
+
+  function _resetToAwaiting() {
+    const el = _tickerEl();
+    if (!el) return;
+    el.textContent = "AWAITING INTEL";
+    el.classList.remove("intel-ticker-active");
+
+    const dots = _ellipsisEl();
+    if (dots) dots.style.display = "";
   }
 
   function renderIntel(rooms, _container, radarTargets) {
@@ -39,7 +50,7 @@
       const last = rooms[rooms.length - 1];
       if (last) {
         const hasThreat = (last.threats || []).length > 0;
-        const status = hasThreat ? "⚠ THREAT" : "✓ Clear";
+        const status = hasThreat ? "THREAT" : "CLEAR";
         const objects =
           (last.objects || []).length
             ? " · " + last.objects.slice(0, 3).join(", ")

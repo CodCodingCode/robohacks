@@ -1,38 +1,27 @@
 /*
- * app.js — glue: unified state, adapter merge, mock or WebSocket feed,
+ * app.js — glue: unified state, adapter merge, WebSocket live feed,
  * MJPEG camera URLs, per-panel staleness, read-only operator surface.
  *
  * Query params:
- *   feed=mock|same|ws     default: mock (or "same" on :8080/:8000/:8001)
- *   feed=same             ws://this-host/ws (map_stream_node serves page + WS)
+ *   feed=same|ws          default: "same" (ws://this-host/ws)
  *   feed=ws&ws=URL        explicit WebSocket JSON (partial updates OK)
  *   mjpeg=URL             main RGB camera (MJPEG or snapshot URL)
  *   gripper_mjpeg=URL     gripper / tool cam (optional)
  *   nocamera=1            on :8080, skip default MJPEG (see below)
  *   camera_port=8090      with default MJPEG only (default 8090)
  *   camera_topic=/mars/…  with default MJPEG only (default main left raw)
- *
- * On http(s)://host:8080/ with no mjpeg=, the main panel defaults to
- * {proto}//host:camera_port/stream?topic=camera_topic (camera_port default 8090)
- * so one *browser* URL on 8080 loads map + WS + video while web_video_server
- * listens on 8090 (avoids colliding with this server on 8080).
- *
- *   allow_local_mission=1 when feed=ws, allow footer mode buttons to override display only
+ *   allow_local_mission=1 allow footer mode buttons to override display only
  */
 
 (function () {
   const params = new URLSearchParams(window.location.search);
-  const port = location.port || "";
-  const inferSameOrigin =
-    port === "8080" || port === "8000" || port === "8001";
-  const feedMode = (
-    params.get("feed") || (inferSameOrigin ? "same" : "mock")
-  ).toLowerCase();
+  const feedMode = (params.get("feed") || "same").toLowerCase();
   const wsExplicit = (params.get("ws") || "").trim();
   let mjpegMain = (params.get("mjpeg") || "").trim();
   const mjpegGripper =
     (params.get("gripper_mjpeg") || params.get("gripper") || "").trim();
   const nocamera = params.get("nocamera") === "1";
+  const port = location.port || "";
   const mapStreamPort8080 = port === "8080";
   if (!nocamera && !mjpegMain && mapStreamPort8080) {
     const camPort = (params.get("camera_port") || "8090").trim() || "8090";
@@ -45,15 +34,10 @@
   const allowLocalMission = params.get("allow_local_mission") === "1";
 
   let wsConnectUrl = "";
-  if (feedMode === "same") {
-    wsConnectUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
-  } else if (feedMode === "ws") {
+  if (feedMode === "ws" && wsExplicit) {
     wsConnectUrl = wsExplicit;
-  }
-
-  const liveWs = feedMode !== "mock" && !!wsConnectUrl;
-  if (feedMode === "ws" && !wsExplicit) {
-    console.warn("RECON dashboard: feed=ws but no ws= URL — use mock or feed=same.");
+  } else {
+    wsConnectUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
   }
 
   const state = ReconAdapter.initialState();
@@ -67,21 +51,23 @@
     gripperCam: 0,
   };
 
+  /* ---- DOM refs ---- */
   const canvas = document.getElementById("tactical-map");
   const telemetryEl = document.getElementById("telemetry-feed");
   const connectionChip = document.getElementById("connection-chip");
   const clockEl = document.getElementById("clock");
-  const missionPhaseEl = document.getElementById("mission-phase");
   const peopleCountEl = document.getElementById("people-count");
   const threatCountEl = document.getElementById("threat-count");
   const batteryLevelEl = document.getElementById("battery-level");
-  const mapMetaEl = document.getElementById("map-meta");
+  const mapMetaTextEl = document.getElementById("map-meta-text");
+  const mapBlinkEl = document.getElementById("map-blink");
   const cameraMetaEl = document.getElementById("camera-meta");
   const telemetryMetaEl = document.getElementById("telemetry-meta");
   const gripperFeedMetaEl = document.getElementById("gripper-feed-meta");
   const cameraImg = document.getElementById("camera-feed");
   const gripperImg = document.getElementById("gripper-feed");
   const missionBar = document.getElementById("mission-mode-bar");
+  const autonomyToggle = document.getElementById("autonomy-toggle");
 
   const defusalEls = {
     device: document.getElementById("defusal-device"),
@@ -103,6 +89,17 @@
 
   ReconMap.initMap(canvas);
 
+  /* ---- Autonomy toggle ---- */
+  if (autonomyToggle) {
+    autonomyToggle.addEventListener("click", function () {
+      const isOn = this.dataset.state === "on";
+      this.dataset.state = isOn ? "off" : "on";
+      const label = this.querySelector(".autonomy-pill-label");
+      if (label) label.textContent = isOn ? "OFF" : "ON";
+    });
+  }
+
+  /* ---- Staleness helpers ---- */
   function ageLabel(ts) {
     if (!ts) return "—";
     const s = (Date.now() - ts) / 1000;
@@ -127,8 +124,13 @@
   }
 
   function updateStalenessDom() {
-    if (mapMetaEl) {
-      mapMetaEl.textContent = `Updated ${ageLabel(staleness.map)}`;
+    if (mapMetaTextEl) {
+      const age = ageLabel(staleness.map);
+      mapMetaTextEl.textContent = age === "live" ? "UPDATED LIVE" : `UPDATED ${age}`;
+    }
+    if (mapBlinkEl) {
+      const isLive = staleness.map && (Date.now() - staleness.map) < 2000;
+      mapBlinkEl.style.display = isLive ? "" : "none";
     }
     if (telemetryMetaEl) {
       telemetryMetaEl.textContent = `Updated ${ageLabel(staleness.telemetry)}`;
@@ -144,9 +146,6 @@
   }
 
   function applyUpstreamMessage(msg) {
-    // Command-executor status frames are out-of-band — they don't flow
-    // through the main state merge (no robot/map/rooms), they just feed
-    // the Commands panel log.
     if (msg && msg.type === "status") {
       if (window.ReconActions && window.ReconActions.applyStatus) {
         window.ReconActions.applyStatus(msg);
@@ -164,57 +163,74 @@
     ReconTelemetry.renderTelemetry(state.telemetry || [], telemetryEl);
     ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
-    renderSemanticPlan(state.semantic_plan);
     ReconIntel.logPlanUpdate(null, state.semantic_plan);
     updateStatusBar(state);
     updateStalenessDom();
   }
 
-  function renderSemanticPlan(_plan) {
-    // Semantic plan updates are now shown in the footer intel ticker
-    // via ReconIntel.logPlanUpdate().
-  }
-
+  /* ---- HUD footer status bar ---- */
   function updateStatusBar(s) {
-    {
-      const p = String(s.mission_phase || "—");
-      missionPhaseEl.textContent =
-        p.length <= 1 ? p : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
-    }
     const people = (s.rooms || []).reduce((acc, r) => acc + (r.people || 0), 0);
     const threats = (s.rooms || []).reduce(
       (acc, r) => acc + ((r.threats || []).length || 0),
       0,
     );
-    peopleCountEl.textContent = String(people);
-    threatCountEl.textContent = String(threats);
-    batteryLevelEl.textContent =
-      s.robot && typeof s.robot.battery === "number"
-        ? `${s.robot.battery}%`
-        : "--%";
 
+    if (peopleCountEl) peopleCountEl.textContent = String(people);
+
+    if (threatCountEl) {
+      threatCountEl.textContent = String(threats);
+      threatCountEl.classList.toggle("has-threats", threats > 0);
+    }
+
+    if (batteryLevelEl) {
+      const hasBattery = s.robot && typeof s.robot.battery === "number";
+      const batt = hasBattery ? s.robot.battery : null;
+      batteryLevelEl.textContent = hasBattery ? `${batt}%` : "--%";
+
+      batteryLevelEl.classList.remove("battery-green", "battery-amber", "battery-red", "battery-none");
+      if (batt == null) {
+        batteryLevelEl.classList.add("battery-none");
+      } else if (batt > 50) {
+        batteryLevelEl.classList.add("battery-green");
+      } else if (batt > 20) {
+        batteryLevelEl.classList.add("battery-amber");
+      } else {
+        batteryLevelEl.classList.add("battery-red");
+      }
+    }
+
+    // Connection state
+    if (s.defusal && s.defusal.active) {
+      setConnectionState("Defusal", "chip-red");
+    } else {
+      const txt = connectionChip
+        ? connectionChip.querySelector(".live-text")
+        : null;
+      if (
+        txt &&
+        txt.textContent !== "RECONNECTING" &&
+        txt.textContent !== "CONNECTING"
+      ) {
+        setConnectionState("LIVE", "chip-green");
+      }
+    }
+
+    // Mission mode buttons (if they exist)
     const phase = (s.mission_phase || "").toLowerCase();
     document.querySelectorAll(".btn-mode").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.mode === phase);
     });
-
-    if (s.defusal && s.defusal.active) {
-      connectionChip.textContent = "Defusal";
-      connectionChip.className = "chip chip-red";
-    } else if (liveWs) {
-      if (
-        connectionChip.textContent !== "Reconnecting" &&
-        connectionChip.textContent !== "Connecting"
-      ) {
-        connectionChip.textContent = "Live";
-        connectionChip.className = "chip chip-green";
-      }
-    } else {
-      connectionChip.textContent = "Mock";
-      connectionChip.className = "chip chip-amber";
-    }
   }
 
+  function setConnectionState(text, cls) {
+    if (!connectionChip) return;
+    connectionChip.className = "live-indicator " + cls;
+    const liveText = connectionChip.querySelector(".live-text");
+    if (liveText) liveText.textContent = text;
+  }
+
+  /* ---- Render loop ---- */
   const TARGET_FPS = 10;
   const FRAME_MS = 1000 / TARGET_FPS;
   let lastFrame = 0;
@@ -236,13 +252,13 @@
   }
   requestAnimationFrame(renderLoop);
 
+  /* ---- WebSocket ---- */
   function connectWebSocket(url, onMessage) {
     let retryTimer = null;
     let ws;
 
     const open = () => {
-      connectionChip.textContent = "Connecting";
-      connectionChip.className = "chip chip-amber";
+      setConnectionState("CONNECTING", "chip-amber");
       try {
         ws = new WebSocket(url);
       } catch (e) {
@@ -251,8 +267,7 @@
       }
 
       ws.onopen = () => {
-        connectionChip.textContent = "Live";
-        connectionChip.className = "chip chip-green";
+        setConnectionState("LIVE", "chip-green");
       };
       ws.onmessage = (ev) => {
         try {
@@ -264,8 +279,7 @@
       };
       ws.onerror = () => {};
       ws.onclose = () => {
-        connectionChip.textContent = "Reconnecting";
-        connectionChip.className = "chip chip-amber";
+        setConnectionState("RECONNECTING", "chip-amber");
         scheduleRetry();
       };
     };
@@ -283,9 +297,6 @@
       if (ws && ws.readyState <= 1) ws.close();
     };
 
-    // send() returns true iff the frame was actually written to an open
-    // socket. Callers use that to show an immediate error in the UI
-    // instead of silently dropping commands.
     const send = (obj) => {
       if (!ws || ws.readyState !== 1) return false;
       try {
@@ -301,23 +312,19 @@
     return { stop, send };
   }
 
+  /* ---- MJPEG wiring ---- */
   function wireMjpeg(img, url, onFrame) {
-    // Retry on error instead of giving up. On a cold start the YOLO node
-    // takes ~4s to warm up, during which web_video_server has nothing to
-    // stream and closes the connection; without a retry the <img> tag is
-    // permanently dead until the user reloads the page.
     if (!img || !url) return;
     img.decoding = "async";
     let retryDelay = 1000;
     const MAX_RETRY = 8000;
     let retryTimer = null;
     const connect = () => {
-      // Cache-bust so the browser doesn't serve us a stale 404 response.
       const sep = url.includes("?") ? "&" : "?";
       img.src = `${url}${sep}_cb=${Date.now()}`;
     };
     img.onload = () => {
-      retryDelay = 1000; // reset backoff on successful frame
+      retryDelay = 1000;
       onFrame();
     };
     img.onerror = () => {
@@ -344,7 +351,7 @@
   }
 
   if (missionBar) {
-    const canPickMission = !liveWs || allowLocalMission;
+    const canPickMission = allowLocalMission;
     missionBar.querySelectorAll(".btn-mode").forEach((btn) => {
       btn.disabled = !canPickMission;
       btn.classList.toggle("btn-mode-locked", !canPickMission);
@@ -356,29 +363,12 @@
     });
   }
 
-  let feed = null;
-  let wsHandle = null; // {stop, send} from connectWebSocket, or null in mock mode
+  /* ---- Feed init — always live WebSocket ---- */
+  let wsHandle = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
+  setConnectionState("CONNECTING", "chip-amber");
 
-  // feed=same → ws://this-host/ws (map_stream_node serves HTML + /ws on one port).
-  // feed=ws&ws=… → explicit bridge URL (e.g. laptop http.server → robot).
-  // feed=mock or default on :8766 etc. → ReconMock.
-  if (liveWs) {
-    wsHandle = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
-    connectionChip.textContent = "Connecting";
-    connectionChip.className = "chip chip-amber";
-  } else {
-    feed = ReconMock.createMockFeed(applyUpstreamMessage);
-    connectionChip.textContent = "Mock";
-    connectionChip.className = "chip chip-amber";
-  }
-
-  // Wire the Commands panel. In mock mode we still init the panel (so the
-  // UI is consistent) but send() rejects because there's no live socket.
   if (window.ReconActions) {
-    const sendFn = wsHandle
-      ? (obj) => wsHandle.send(obj)
-      : null;
-    window.ReconActions.init(commandsEls, sendFn);
+    window.ReconActions.init(commandsEls, (obj) => wsHandle.send(obj));
   }
 
   window.ReconDashboard = {
@@ -388,11 +378,9 @@
       wsConnectUrl,
       mjpegMain,
       mjpegGripper,
-      liveWs,
       allowLocalMission,
     }),
     stop: () => {
-      if (feed && feed.stop) feed.stop();
       if (wsHandle) wsHandle.stop();
     },
   };
@@ -406,8 +394,7 @@
   };
 
   console.log(
-    "RECON BOT dashboard ·",
-    liveWs ? `WS ${wsConnectUrl}` : "mock feed",
+    "RECON v2 dashboard · WS", wsConnectUrl,
     mjpegMain ? " · mjpeg" : "",
     " | params: feed, ws, mjpeg, gripper_mjpeg, nocamera, camera_port, camera_topic, allow_local_mission",
   );
