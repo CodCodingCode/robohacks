@@ -51,6 +51,7 @@ class SerialNodeReceiver:
 
     def _reader_loop(self, node_id: str, port: str) -> None:
         active_port = port
+        print(f"[SERIAL] Reader loop started for node '{node_id}', port={port}")
         while self._running.is_set():
             try:
                 if active_port.strip().upper() == "AUTO":
@@ -59,8 +60,10 @@ class SerialNodeReceiver:
                         time.sleep(0.7)
                         continue
                     active_port = resolved_port
+                    print(f"[SERIAL] Node '{node_id}' auto-detected on {resolved_port}")
                 else:
                     ser = serial.Serial(active_port, self.baud, timeout=0.2)
+                    print(f"[SERIAL] Node '{node_id}' opened {active_port}")
 
                 self._serial_by_node[node_id] = ser
                 while self._running.is_set():
@@ -91,7 +94,8 @@ class SerialNodeReceiver:
                         except Empty:
                             pass
                     self._queue.put(packet)
-            except serial.SerialException:
+            except serial.SerialException as exc:
+                print(f"[SERIAL] Node '{node_id}' serial error on {active_port}: {exc}")
                 if node_id in self._serial_by_node:
                     self._serial_by_node.pop(node_id, None)
                 if port.strip().upper() == "AUTO":
@@ -100,6 +104,8 @@ class SerialNodeReceiver:
 
     def _open_auto_port(self, node_id: str) -> tuple[Optional[serial.Serial], str]:
         ports = [p.device for p in list_ports.comports()]
+        if not ports:
+            print(f"[SERIAL] Auto-detect node '{node_id}': no serial ports found")
         for candidate in ports:
             try:
                 ser = serial.Serial(candidate, self.baud, timeout=0.2)

@@ -88,7 +88,7 @@ SCAN_HZ = 1.0
 # VLM analysis cadence — Gemini rate limit is 1s minimum.
 VLM_INTERVAL = 2.0
 SEMANTIC_MARKER_TTL = 8.0
-AUTONOMY_SWITCHING_ENABLED = False
+AUTONOMY_SWITCHING_ENABLED = True
 
 # LD2450 radar UDP ingest
 RADAR_UDP_PORT = 8766
@@ -128,7 +128,9 @@ class RadarListener:
         self._targets: dict[int, list[tuple[float, float, float, float]]] = {}
 
         self._serial_rx = None
+        self._serial_det_count = 0
         if serial_ports:
+            print(f"[RADAR] Serial ports config: {serial_ports}")
             try:
                 from transport_serial import SerialNodeReceiver
             except ImportError:
@@ -139,11 +141,15 @@ class RadarListener:
                 target=self._serial_poll_loop, daemon=True
             )
             self._serial_thread.start()
+            print("[RADAR] Serial poll thread started")
+        else:
+            print("[RADAR] No serial ports configured — serial radar disabled")
 
         self._udp_thread = threading.Thread(
             target=self._udp_loop, args=(udp_port,), daemon=True
         )
         self._udp_thread.start()
+        print(f"[RADAR] UDP listener started on port {udp_port}")
 
     def _serial_poll_loop(self) -> None:
         while True:
@@ -153,8 +159,11 @@ class RadarListener:
                 continue
             data = pkt.data
             if data.get("msg") != "detections":
+                if self._serial_det_count == 0:
+                    print(f"[RADAR] Serial got non-detection msg: {data.get('msg', '?')} from node {pkt.node_id}")
                 continue
             now = time.time()
+            active_count = 0
             for det in data.get("detections", []):
                 if not det.get("active", False):
                     continue
@@ -169,6 +178,10 @@ class RadarListener:
                     self._targets.setdefault(idx, []).append(
                         (x_m, y_m, speed, now)
                     )
+                active_count += 1
+            self._serial_det_count += 1
+            if self._serial_det_count <= 3 or self._serial_det_count % 100 == 0:
+                print(f"[RADAR] Serial frame #{self._serial_det_count} from {pkt.node_id}: {active_count} active targets")
 
     def _udp_loop(self, port: int) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
