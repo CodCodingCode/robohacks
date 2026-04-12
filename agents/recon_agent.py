@@ -26,7 +26,7 @@ class ReconAgent(Agent):
         return ["local/recon_movement", "yellow"]
 
     def get_inputs(self) -> List[str]:
-        return ["micro"]
+        return []  # was ["micro"] — voice input/output disabled
 
     def get_prompt(self) -> str:
         return """

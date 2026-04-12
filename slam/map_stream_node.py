@@ -1324,10 +1324,11 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         return
 
     session = VLMSession()
-    detector, tts = _init_intruder_alert()
-    if tts is not None:
-        with node._lock:
-            node._tts = tts
+    # detector, tts = _init_intruder_alert()  # voice alerts disabled
+    # if tts is not None:
+    #     with node._lock:
+    #         node._tts = tts
+    detector, tts = None, None
     print("[VLM] VLM thread started.")
 
     _vlm_cycle = 0
