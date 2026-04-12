@@ -702,9 +702,10 @@ class ReconMovementSkill(Skill):
         the robot circling away from the target indefinitely.
         """
         # --- tunables --------------------------------------------------------
-        STEP_S    = 1.2    # seconds per step (was 0.4 — too choppy, caused jitter)
-        CLOSE_M   = 0.35   # depth-based stop distance (metres)
-        Kp        = 0.8    # proportional steering gain
+        STEP_S    = 0.4    # seconds per sensor step
+        ALIGN_TOL = 0.08   # rad (~4.5°) — drive straight when roughly centered
+        CLOSE_M   = 0.45   # depth-based stop distance (metres)
+        Kp        = 1.4    # bearing → angular_z gain (aggressive = fast correction)
         # ---------------------------------------------------------------------
 
         remaining = max_duration
@@ -792,25 +793,26 @@ class ReconMovementSkill(Skill):
                 self._feedback(f"Obstacle {fwd:.2f}m ahead — stopping")
                 return f"Obstacle blocked approach to {target}", SkillResult.FAILURE
 
-            # ── Drive with proportional steering (no dead-zone) ────────────
+            # ── Orient then drive (one short step per loop iteration) ─────
             fwd = _get_min_forward_m()
             dur = min(STEP_S, remaining)
-
-            # Always steer proportionally — even small bearing errors get
-            # corrected instead of accumulating as drift.
-            angular_z = _bearing_to_angular_z(bearing, gain=Kp)
-
-            # Slow down when close to target; reduce forward speed for large
-            # bearing errors (>45°) but keep moving forward at all times.
-            speed_scale = min(1.0, max(0.4, (depth - CLOSE_M) / 1.0))
-            forward_scale = max(0.5, 1.0 - abs(bearing) / (math.pi / 2.0))
-            linear_x = self._planner.APPROACH_SPEED * speed_scale * forward_scale
-
-            self._feedback(
-                f"Driving to {target} "
-                f"(bearing={bearing:+.2f} rad, depth={depth:.2f}m)"
-            )
-            _publish_approach_state(bbox, depth, bearing, "driving", fwd)
+            if abs(bearing) > ALIGN_TOL:
+                # Rotate to center the target; gentle forward motion while correcting.
+                angular_z = _bearing_to_angular_z(bearing, gain=Kp)
+                forward_scale = max(0.3, 1.0 - abs(bearing) / (math.pi / 3.0))
+                linear_x = self._planner.APPROACH_SPEED * forward_scale
+                self._feedback(
+                    f"Aligning to {target} "
+                    f"(bearing={bearing:+.2f} rad, depth={depth:.2f}m)"
+                )
+                _publish_approach_state(bbox, depth, bearing, "aligning", fwd)
+            else:
+                # Heading is good — drive straight with zero angular correction.
+                speed_scale = min(1.0, max(0.4, (depth - CLOSE_M) / 1.0))
+                linear_x = self._planner.APPROACH_SPEED * speed_scale
+                angular_z = 0.0
+                self._feedback(f"Driving to {target} (depth={depth:.2f}m)")
+                _publish_approach_state(bbox, depth, bearing, "driving", fwd)
 
             self.mobility.send_cmd_vel(linear_x, angular_z, dur)
             # No _sleep — send_cmd_vel already blocks for the duration
