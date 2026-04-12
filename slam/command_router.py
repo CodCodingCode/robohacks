@@ -47,10 +47,21 @@ def normalize_command(text: str) -> str:
     return " ".join(str(text or "").lower().replace("_", " ").split())
 
 
+def extract_say_text(command: str) -> str:
+    """Return the text to speak if this is a 'say ...' command, else empty string."""
+    for prefix in ("say ", "announce ", "speak "):
+        if command.startswith(prefix):
+            return command[len(prefix):].strip()
+    return ""
+
+
 def route_command(text: str) -> CommandRoute:
     command = normalize_command(text)
     if not command:
         return CommandRoute("error", "empty command")
+    say_text = extract_say_text(command)
+    if say_text:
+        return CommandRoute("speak", say_text)
     if command in STOP_COMMANDS:
         return CommandRoute("stop", "Holding position")
     if command in AUTONOMY_ENABLE_COMMANDS:
@@ -124,7 +135,7 @@ class ReconCommandRouter:
         self._stop_event = threading.Event()
         self._task: asyncio.Task | None = None
 
-    async def handle(self, text: str) -> bool:
+    async def handle(self, text: str, node: Any = None) -> bool:
         route = route_command(text)
         if route.kind == "fallback":
             return False
@@ -133,6 +144,12 @@ class ReconCommandRouter:
             return True
         if route.kind == "stop":
             await self.stop(route.text)
+            return True
+        if route.kind == "speak":
+            if node is not None and node.speak(route.text):
+                await self._broadcast({"phase": "done", "text": f'Speaking: "{route.text}"'})
+            else:
+                await self._broadcast({"phase": "error", "text": "TTS unavailable — set ELEVENLABS_API_KEY"})
             return True
         if route.kind == "skill" and route.skill is not None:
             await self._start_skill(route)

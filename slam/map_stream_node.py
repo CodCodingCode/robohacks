@@ -137,6 +137,7 @@ class MapStreamNode(Node):
         # One-shot alert: set when autonomy auto-disables on "done", cleared on read.
         self._alert: str | None = None
         self._manual_motion_token: int = 0
+        self._tts = None  # ElevenLabsTTS instance, set by run_vlm_thread
 
         # /cmd_vel publisher — used by the planner thread when autonomy is on.
         from geometry_msgs.msg import Twist  # noqa: PLC0415
@@ -388,6 +389,15 @@ class MapStreamNode(Node):
         msg.data = action
         self._defusal_action_pub.publish(msg)
         self.get_logger().info(f"defusal action published: {action}")
+
+    def speak(self, text: str) -> bool:
+        """Speak text via ElevenLabs TTS. Returns False if TTS is unavailable."""
+        with self._lock:
+            tts = self._tts
+        if tts is None:
+            return False
+        tts.speak_async(text)
+        return True
 
     def publish_twist(self, linear_x: float, angular_z: float) -> None:
         from geometry_msgs.msg import Twist  # noqa: PLC0415
@@ -688,6 +698,9 @@ def run_vlm_thread(node: MapStreamNode) -> None:
 
     session = VLMSession()
     detector, tts = _init_intruder_alert()
+    if tts is not None:
+        with node._lock:
+            node._tts = tts
     print("[VLM] VLM thread started.")
 
     while True:
@@ -789,7 +802,7 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                         }))
                 elif msg.get("cmd") == "operator_command":
                     text = str(msg.get("text", "")).strip()
-                    if await command_router.handle(text):
+                    if await command_router.handle(text, node):
                         if normalize_command(text) in STOP_COMMANDS:
                             await command_executor.stop()
                     else:
@@ -809,7 +822,7 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                         }))
                         continue
 
-                    if await command_router.handle(text):
+                    if await command_router.handle(text, node):
                         if normalize_command(text) in STOP_COMMANDS:
                             await command_executor.stop()
                         continue
