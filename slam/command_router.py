@@ -25,6 +25,7 @@ CLEAR_MAP_COMMANDS = {"clear map", "reset map", "clear markers", "reset markers"
 class CommandRoute:
     kind: str
     text: str
+    target: str = ""
 
 
 def normalize_command(text: str) -> str:
@@ -59,7 +60,26 @@ def route_command(text: str) -> CommandRoute:
         return CommandRoute("stop", "Abort received; holding position")
     if command in CLEAR_MAP_COMMANDS:
         return CommandRoute("clear_map", "Map annotations cleared")
+    target = _extract_approach_target(command)
+    if target:
+        return CommandRoute("approach_target", f"Approaching {target}", target=target)
     return CommandRoute("fallback", "Forward to brain agent")
+
+
+def _extract_approach_target(command: str) -> str:
+    """Extract object name from 'move to X', 'approach X', 'go to X', etc."""
+    import re
+    patterns = [
+        r"^(?:move|go|navigate|drive|walk)\s+(?:to|towards?|toward)\s+(?:the\s+)?(.+)$",
+        r"^(?:approach|inspect|reach|find|locate)\s+(?:the\s+)?(.+)$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, command)
+        if m:
+            target = m.group(1).strip()
+            if target and target not in {"area", "room", "wall", "obstacle"}:
+                return target
+    return ""
 
 
 class ReconCommandRouter:
@@ -89,6 +109,16 @@ class ReconCommandRouter:
             if node is not None:
                 node.clear_persistent_markers()
             await self._broadcast({"phase": "done", "text": route.text})
+            return True
+        if route.kind == "approach_target":
+            if node is not None:
+                node.activate_agent("recon_agent")
+                # Send an explicit, unambiguous instruction so the PEAS agent
+                # calls approach_object without any conversational hesitation.
+                node.publish_chat_in(
+                    f"Call recon_movement skill with action=approach_object and target={route.target}"
+                )
+            await self._broadcast({"phase": "planning", "text": f"→ approaching {route.target}"})
             return True
         return False
 
