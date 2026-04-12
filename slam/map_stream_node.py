@@ -284,6 +284,8 @@ class MapStreamNode(Node):
         self._alert: str | None = None
         self._manual_motion_token: int = 0
         self._tts = None  # ElevenLabsTTS instance, set by run_vlm_thread
+        self._mission_running: bool = False
+        self._mission_broadcast_fn = None  # set by serve() for mission_update msgs
 
         # /cmd_vel publisher — used by the planner thread when autonomy is on.
         from geometry_msgs.msg import Twist  # noqa: PLC0415
@@ -851,12 +853,35 @@ class MapStreamNode(Node):
     # -- Autonomy --------------------------------------------------------
 
     def set_autonomy(self, enabled: bool) -> None:
-        if enabled and not AUTONOMY_SWITCHING_ENABLED:
+        if enabled and not AUTONOMY_SWITCHING_ENABLED and not self._mission_running:
             self.get_logger().info("autonomy enable ignored: autonomous switching disabled")
             return
         with self._lock:
             self._autonomy_enabled = enabled
         self.get_logger().info(f"autonomy {'ENABLED' if enabled else 'DISABLED'}")
+
+    def start_mission(self) -> None:
+        """Activate the autonomous bomb-disposal mission."""
+        self._mission_running = True
+        self.set_autonomy(True)
+        self.set_planner_phase("scanning")
+        self.get_logger().info("[MISSION] autonomous bomb-disposal mission STARTED")
+
+    def stop_mission(self) -> None:
+        """Abort the autonomous mission."""
+        self._mission_running = False
+        self.set_autonomy(False)
+        self.set_planner_phase("idle")
+        self.stop_manual_motion()
+        self.get_logger().info("[MISSION] mission STOPPED")
+
+    def broadcast_mission_phase(self, phase: str) -> None:
+        """Push a mission_update message to all WS clients via the broadcast fn."""
+        if self._mission_broadcast_fn:
+            try:
+                self._mission_broadcast_fn(phase)
+            except Exception:
+                pass
 
     @property
     def autonomy_enabled(self) -> bool:
@@ -1317,7 +1342,7 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         try:
             planner_phase = node.get_planner_phase()
             print(f"[VLM] cycle {_vlm_cycle}: got frame ({len(image_b64)} bytes), phase={planner_phase}, calling Gemini…")
-            if planner_phase == "approach":
+            if planner_phase in ("approach", "approaching_bomb", "defusing"):
                 # Bypass VLMSession: call defusal prompt directly so the
                 # defusal/wires keys are NOT stripped before reaching the dashboard.
                 result = analyze_frame(image_b64, phase="defusal")
@@ -1368,6 +1393,24 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
     command_executor = CommandExecutor(node, broadcast_status)
     await command_executor.start()
     command_router = ReconCommandRouter(node, broadcast_status)
+
+    loop = asyncio.get_event_loop()
+
+    def _mission_phase_bridge(phase: str) -> None:
+        """Thread-safe bridge to send mission_update to all WS clients."""
+        async def _do():
+            payload = json.dumps({"type": "mission_update", "phase": phase})
+            stale = []
+            for c in list(clients):
+                try:
+                    await c.send(payload)
+                except Exception:
+                    stale.append(c)
+            for c in stale:
+                clients.discard(c)
+        loop.call_soon_threadsafe(asyncio.ensure_future, _do())
+
+    node._mission_broadcast_fn = _mission_phase_bridge
 
     # Brain chat bridge — receives /brain/chat_out from the ROS callback thread
     # and broadcasts it to all dashboard WebSocket clients.
@@ -1427,7 +1470,13 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
                     msg = json.loads(raw)
                 except Exception:
                     continue
-                if msg.get("cmd") == "set_autonomy":
+                if msg.get("cmd") == "start_mission":
+                    node.start_mission()
+                    await broadcast_status({"phase": "scanning", "text": "Mission started"})
+                elif msg.get("cmd") == "stop_mission":
+                    node.stop_mission()
+                    await broadcast_status({"phase": "idle", "text": "Mission aborted"})
+                elif msg.get("cmd") == "set_autonomy":
                     enabled = bool(msg.get("enabled", False))
                     node.set_autonomy(enabled)
                     if enabled and not AUTONOMY_SWITCHING_ENABLED:
@@ -1502,9 +1551,10 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
         last_vlm_push_ts = 0.0
         while True:
             pose, occ, scan, bat = node.snapshot()
+            current_phase = node.get_planner_phase() if node._mission_running else "idle"
             payload: dict = {
                 "timestamp": time.time(),
-                "mission_phase": "recon",
+                "mission_phase": current_phase,
             }
             if pose is not None:
                 payload["robot"] = build_robot_payload(pose, bat)
@@ -1619,35 +1669,35 @@ def _execute_command(node: MapStreamNode, cmd: "RobotCommand") -> None:
 
 
 def run_planner_thread(node: MapStreamNode) -> None:
-    """Background thread: call the Planner every cycle and optionally execute.
+    """Background thread: runs the MissionPlanner FSM when a mission is active.
 
-    When autonomy is disabled the thread still runs — it keeps the planner
-    state live and populates ``pending_cmd`` so the dashboard can show the
-    operator what the robot *would* do next.
+    The thread runs continuously. When no mission is active it idles.
+    When a mission starts (via start_mission), it drives the full FSM:
+    scanning → person_detected → approaching_person → evacuating → searching
+    → bomb_detected → approaching_bomb → defusing → done.
     """
-    if not AUTONOMY_SWITCHING_ENABLED:
-        print("[Planner] autonomous switching disabled — planner thread not started.")
-        return
-
     try:
-        from vlm import Planner
+        from vlm.planner import MissionPlanner
     except ImportError:
         print("[Planner] vlm module not found — planner thread disabled.")
         return
 
-    planner = Planner()
-    print("[Planner] Planner thread started.")
+    planner = MissionPlanner()
+    print("[Planner] Planner thread started (waiting for mission).")
+    last_phase = ""
 
     while True:
-        vlm_result = node.get_vlm_result()
+        if not node._mission_running:
+            time.sleep(0.5)
+            planner.reset()
+            last_phase = ""
+            continue
 
+        vlm_result = node.get_vlm_result()
         if not vlm_result:
             time.sleep(1.0)
             continue
 
-        # If Gemini has been failing, _vlm_result_ts falls behind. After two
-        # missed VLM cycles (2 × VLM_INTERVAL), strip threat signals so the
-        # planner doesn't keep chasing a threat from a stale frame.
         with node._lock:
             result_age = time.time() - node._vlm_result_ts
         if result_age > VLM_INTERVAL * 2:
@@ -1656,10 +1706,10 @@ def run_planner_thread(node: MapStreamNode) -> None:
                           "annotations": [],
                           "defusal": {}}
 
-        if node.autonomy_enabled:
-            # Augment VLM result with live depth for the priority threat target,
-            # so the planner can use real distance instead of bbox size proxy.
-            target = planner._find_priority_target(vlm_result)
+        # Augment with depth data for approach phases
+        if planner.phase in ("approaching_person", "approaching_bomb"):
+            cat = "person" if planner.phase == "approaching_person" else "threat"
+            target = planner._find_target(vlm_result, cat)
             if target:
                 try:
                     depth = node.get_depth_at_bbox(target["bbox"])
@@ -1668,29 +1718,43 @@ def run_planner_thread(node: MapStreamNode) -> None:
                 if depth is not None:
                     vlm_result = {**vlm_result, "_threat_depth_m": depth}
 
-            # Mutate planner state and execute the command.
-            cmd = planner.next_command(vlm_result)
-            node.set_pending_command(cmd)
-            node.set_planner_phase(planner.phase)
+        cmd = planner.next_command(vlm_result)
+        node.set_pending_command(cmd)
+        node.set_planner_phase(planner.phase)
 
-            if cmd.kind == "done":
-                node.set_autonomy(False)
-                node.set_alert(cmd.reason)
-                node.set_planner_phase("done")  # freeze VLM on defusal prompt until reset
-                planner.reset()
-                time.sleep(1.0)
-            else:
-                _execute_command(node, cmd)
+        # Broadcast phase changes to dashboard
+        if planner.phase != last_phase:
+            last_phase = planner.phase
+            node.broadcast_mission_phase(planner.phase)
+            print(f"[MISSION] phase → {planner.phase}")
+
+        if cmd.kind == "done":
+            node.set_alert(cmd.reason)
+            node.broadcast_mission_phase("done")
+            node._mission_running = False
+            node.set_autonomy(False)
+            node.set_planner_phase("done")
+            planner.reset()
+            print(f"[MISSION] COMPLETE: {cmd.reason}")
+            time.sleep(1.0)
+        elif cmd.kind == "speak":
+            # TTS evacuation warning
+            tts = getattr(node, "_tts", None)
+            if tts is not None:
+                try:
+                    tts.speak_async(cmd.reason)
+                except Exception as exc:
+                    print(f"[MISSION] TTS error: {exc}")
+            time.sleep(cmd.duration)
+        elif cmd.kind == "defuse":
+            # Publish wire-cut action
+            from std_msgs.msg import String as _String  # noqa: PLC0415
+            wire_color = cmd.reason.replace("cut ", "").strip()
+            node._defusal_action_pub.publish(_String(data=f"cut {wire_color}"))
+            print(f"[MISSION] defuse action: cut {wire_color}")
+            time.sleep(cmd.duration)
         else:
-            # Autonomy OFF: preview without mutating — counter stays frozen.
-            cmd = planner.preview_command(vlm_result)
-            node.set_pending_command(cmd)
-            # Guard: don't overwrite "done" — it was set by the done-handler and
-            # must survive until the VLM thread (3s cadence) reads it. Once the
-            # VLM thread has switched to defusal prompts it will no longer matter.
-            if node.get_planner_phase() != "done":
-                node.set_planner_phase(planner.phase)
-            time.sleep(0.2)
+            _execute_command(node, cmd)
 
 
 def main() -> None:

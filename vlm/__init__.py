@@ -9,19 +9,21 @@ from __future__ import annotations
 
 __all__ = [
     "Planner",
+    "MissionPlanner",
     "RobotCommand",
     "VLMSession",
     "analyze_frame",
+    "analyze_navigation",
     "ask_operator_question",
 ]
 
 
 def __getattr__(name: str):
-    if name in {"analyze_frame", "ask_operator_question", "VLMSession"}:
+    if name in {"analyze_frame", "analyze_navigation", "ask_operator_question", "VLMSession"}:
         from vlm import analyze
 
         return getattr(analyze, name)
-    if name in {"Planner", "RobotCommand"}:
+    if name in {"Planner", "MissionPlanner", "RobotCommand"}:
         from vlm import planner
 
         return getattr(planner, name)

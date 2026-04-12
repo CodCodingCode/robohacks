@@ -69,6 +69,9 @@
   const missionBar = document.getElementById("mission-mode-bar");
   const autonomyToggle = document.getElementById("autonomy-toggle");
 
+  const startMissionBtn = document.getElementById("start-mission-btn");
+  const intelTickerEl = document.getElementById("intel-ticker");
+
   const defusalEls = {
     device: document.getElementById("defusal-device"),
     recommendation: document.getElementById("defusal-recommendation"),
@@ -98,6 +101,61 @@
       const label = this.querySelector(".autonomy-pill-label");
       if (label) label.textContent = isOn ? "OFF" : "ON";
     });
+  }
+
+  /* ---- Start Mission button ---- */
+  let missionRunning = false;
+  if (startMissionBtn) {
+    startMissionBtn.addEventListener("click", function () {
+      if (!missionRunning) {
+        missionRunning = true;
+        this.textContent = "ABORT MISSION";
+        this.classList.add("mission-active");
+        this.classList.remove("mission-done");
+        wsHandle.send({ cmd: "start_mission" });
+      } else {
+        missionRunning = false;
+        this.textContent = "START MISSION";
+        this.classList.remove("mission-active", "mission-done");
+        wsHandle.send({ cmd: "stop_mission" });
+      }
+    });
+  }
+
+  function updateMissionButton(phase) {
+    if (!startMissionBtn) return;
+    if (phase === "done") {
+      missionRunning = false;
+      startMissionBtn.textContent = "MISSION COMPLETE";
+      startMissionBtn.classList.remove("mission-active");
+      startMissionBtn.classList.add("mission-done");
+      setTimeout(function () {
+        startMissionBtn.textContent = "START MISSION";
+        startMissionBtn.classList.remove("mission-done");
+      }, 5000);
+    } else if (phase === "idle") {
+      missionRunning = false;
+      startMissionBtn.textContent = "START MISSION";
+      startMissionBtn.classList.remove("mission-active", "mission-done");
+    }
+  }
+
+  const PHASE_LABELS = {
+    idle:               "AWAITING MISSION",
+    scanning:           "SCANNING ENVIRONMENT",
+    person_detected:    "PERSON DETECTED",
+    approaching_person: "APPROACHING PERSON",
+    evacuating:         "ISSUING EVACUATION WARNING",
+    searching:          "SEARCHING FOR BOMB",
+    bomb_detected:      "BOMB DETECTED",
+    approaching_bomb:   "APPROACHING BOMB",
+    defusing:           "DEFUSING DEVICE",
+    done:               "MISSION COMPLETE",
+  };
+
+  function updateIntelTicker(phase) {
+    if (!intelTickerEl) return;
+    intelTickerEl.textContent = PHASE_LABELS[phase] || phase.toUpperCase();
   }
 
   /* ---- Staleness helpers ---- */
@@ -153,9 +211,18 @@
       }
       return;
     }
+    if (msg && msg.type === "mission_update") {
+      updateMissionButton(msg.phase);
+      updateIntelTicker(msg.phase);
+      return;
+    }
     touchStalenessFromMessage(msg);
     const next = ReconAdapter.mergeState(state, msg);
     Object.assign(state, next);
+    if (msg.mission_phase) {
+      updateMissionButton(msg.mission_phase);
+      updateIntelTicker(msg.mission_phase);
+    }
     renderAll();
   }
 

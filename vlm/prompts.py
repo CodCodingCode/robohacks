@@ -157,6 +157,50 @@ def defusal_prompt() -> tuple[str, str]:
     return system, user
 
 
+def navigation_prompt() -> tuple[str, str]:
+    """VLM-guided navigation — obstacle avoidance and path finding."""
+    system = _JSON_PREAMBLE
+    user = (
+        "Analyze this camera frame from a bomb-disposal robot navigating an indoor environment.\n"
+        "\n"
+        "Return JSON with this exact schema:\n"
+        "{\n"
+        '  "reasoning": "<one sentence describing visible path and obstacles>",\n'
+        '  "path_clear": <bool, true if there is a clear path ahead>,\n'
+        '  "obstacles": [\n'
+        "    {\n"
+        '      "label": "<what it is, e.g. wall, chair, door>",\n'
+        '      "bbox": [y_min, x_min, y_max, x_max],\n'
+        '      "position": "<left | center | right>"\n'
+        "    }\n"
+        "  ],\n"
+        '  "person_visible": <bool>,\n'
+        '  "threat_visible": <bool>,\n'
+        '  "annotations": [\n'
+        "    {\n"
+        '      "label": "<entity description>",\n'
+        '      "bbox": [y_min, x_min, y_max, x_max],\n'
+        '      "category": "<person | threat | object | obstacle>"\n'
+        "    }\n"
+        "  ],\n"
+        '  "navigation": {\n'
+        '    "action": "<advance | turn_left | turn_right | reverse | hold>",\n'
+        '    "confidence": "<high | medium | low>",\n'
+        '    "rationale": "<why this action is recommended>"\n'
+        "  }\n"
+        "}\n"
+        "\n"
+        "Rules:\n"
+        "- Focus on navigable space and immediate obstacles.\n"
+        "- If a wall blocks the path, recommend turning in the direction with more open space.\n"
+        "- If a person is visible, set person_visible=true and include an annotation.\n"
+        "- If a suspicious item is visible, set threat_visible=true and include an annotation.\n"
+        f"- {_BBOX_RULE}\n"
+        f"- {_STANDOFF_RULE}\n"
+    )
+    return system, user
+
+
 def operator_qa_prompt(question: str) -> tuple[str, str]:
     """Operator asks a free-form question about the current frame.
 

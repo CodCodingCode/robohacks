@@ -25,7 +25,7 @@ from typing import Literal
 from google import genai
 from google.genai import types
 
-from vlm.prompts import recon_prompt, defusal_prompt, operator_qa_prompt
+from vlm.prompts import recon_prompt, defusal_prompt, navigation_prompt, operator_qa_prompt
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -94,6 +94,45 @@ def analyze_frame(
         print(f"[VLM_DEBUG] Raw Gemini response:\n{raw}\n")
 
     return _parse_response(raw, phase)
+
+
+def analyze_navigation(image_b64: str) -> dict:
+    """Analyze a frame for VLM-guided navigation (obstacle avoidance + path finding).
+
+    Returns a dict with navigation action, obstacles, and person/threat flags.
+    """
+    global _last_call
+
+    elapsed = time.time() - _last_call
+    if elapsed < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - elapsed)
+
+    system, user_text = navigation_prompt()
+    raw = _call_gemini(system, user_text, image_b64)
+    _last_call = time.time()
+
+    try:
+        data = _parse_json(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {
+            "path_clear": True,
+            "obstacles": [],
+            "person_visible": False,
+            "threat_visible": False,
+            "annotations": [],
+            "navigation": {
+                "action": "hold",
+                "confidence": "low",
+                "rationale": "VLM parse error — waiting for next frame",
+            },
+        }
+
+    data["annotations"] = _normalize_annotations(data.get("annotations", []))
+    nav = data.get("navigation", {})
+    if not isinstance(nav, dict):
+        nav = {"action": "hold", "confidence": "low", "rationale": ""}
+    data["navigation"] = nav
+    return data
 
 
 def ask_operator_question(image_b64: str, question: str) -> str:

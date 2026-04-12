@@ -429,6 +429,38 @@ html.recon-dark body {
   border-left: 0.5px solid var(--border);
 }
 
+.btn-start-mission {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px auto 0;
+  padding: 10px 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--bg-base);
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.btn-start-mission:hover {
+  opacity: 0.85;
+}
+
+.btn-start-mission.mission-active {
+  background: var(--red);
+  color: var(--text-primary);
+}
+
+.btn-start-mission.mission-done {
+  background: var(--green);
+  color: var(--bg-base);
+}
+
 .canvas-wrap {
   flex: 1;
   position: relative;
