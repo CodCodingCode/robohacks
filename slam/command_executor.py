@@ -248,17 +248,9 @@ class CommandExecutor:
         if not raw:
             raise PlanError("planner returned empty response")
         try:
-            data = json.loads(raw)
-        except Exception:
-            # Gemini sometimes still wraps in fences even with mime_type set.
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                lines = [l for l in cleaned.split("\n") if not l.startswith("```")]
-                cleaned = "\n".join(lines)
-            try:
-                data = json.loads(cleaned)
-            except Exception as exc:
-                raise PlanError(f"could not parse planner JSON: {exc}")
+            data = _parse_planner_json(raw)
+        except PlanError as exc:
+            return {"steps": [{"op": "stop"}], "rationale": f"{exc}; holding position"}
 
         if not isinstance(data, dict) or "steps" not in data:
             raise PlanError("planner JSON missing 'steps'")
@@ -351,6 +343,83 @@ def _as_float(v: Any, default: float) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_planner_json(raw: str) -> dict:
+    """Parse Gemini JSON, salvaging a complete steps array from truncated text."""
+    cleaned = _strip_json_fences(raw)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        steps = _extract_steps_array(cleaned)
+        if steps is None:
+            raise PlanError(f"could not parse planner JSON: {exc}") from exc
+        data = {
+            "steps": steps,
+            "rationale": "Planner response was truncated after steps.",
+        }
+    if not isinstance(data, dict):
+        raise PlanError("planner JSON was not an object")
+    return data
+
+
+def _strip_json_fences(raw: str) -> str:
+    cleaned = str(raw or "").strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+    lines = cleaned.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _extract_steps_array(text: str) -> list[Any] | None:
+    key_pos = text.find('"steps"')
+    if key_pos < 0:
+        return None
+    colon_pos = text.find(":", key_pos + len('"steps"'))
+    if colon_pos < 0:
+        return None
+    start = colon_pos + 1
+    while start < len(text) and text[start].isspace():
+        start += 1
+    if start >= len(text) or text[start] != "[":
+        return None
+    end = _json_array_end(text, start)
+    if end is None:
+        return None
+    try:
+        steps = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return steps if isinstance(steps, list) else None
+
+
+def _json_array_end(text: str, start: int) -> int | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(text)):
+        char = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
 
 
 def _sanitize_steps(steps: list[Any]) -> list[dict]:

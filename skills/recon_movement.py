@@ -78,11 +78,11 @@ SUPPORTED_ACTIONS = {
     "reset_recon",
 }
 
-MAX_FORWARD_SPEED_MPS = 0.10
+MAX_FORWARD_SPEED_MPS = 0.15
 MAX_ANGULAR_SPEED_RADPS = 0.40
-MAX_FORWARD_DISTANCE_M = 1.00
-MAX_COMMAND_DURATION_S = 2.00
-MAX_APPROACH_DURATION_S = 30.00
+MAX_FORWARD_DISTANCE_M = 3.00
+MAX_COMMAND_DURATION_S = 10.00
+MAX_APPROACH_DURATION_S = 60.00
 SEARCH_SPIN_SPEED_RADPS = 0.25
 SCAN_STEPS = 8
 
@@ -346,17 +346,13 @@ class ReconMovementSkill(Skill):
         success_message: str,
     ):
         remaining = min(duration_s, MAX_APPROACH_DURATION_S)
-        any_motion = False
         while remaining > 0.0:
             if self._cancelled:
                 self._stop()
                 return "Movement cancelled", SkillResult.CANCELLED
             chunk = min(remaining, MAX_COMMAND_DURATION_S)
-            moved = self.mobility.send_cmd_vel(linear_x, angular_z, chunk)
-            if not moved:
-                self._stop()
-                return "Obstacle too close — cannot move forward", SkillResult.FAILURE
-            any_motion = True
+            self.mobility.send_cmd_vel(linear_x, angular_z, chunk)
+            self._sleep(chunk)
             remaining -= chunk
         self._stop()
         return success_message, SkillResult.SUCCESS

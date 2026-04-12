@@ -1,24 +1,17 @@
 """Safe command routing for dashboard operator text.
 
-This module keeps the browser protocol thin and routes known recon intents to
-the bounded recon skill before falling back to the free-form command executor.
+Routes known meta-commands (stop, speak, abort, autonomy) locally.
+Everything else returns "fallback" so map_stream_node can forward it
+to the PEAS cloud agent via /brain/chat_in.
 """
 
 from __future__ import annotations
 
 import asyncio
-import math
-import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
-
-from skills.recon_movement import (
-    MAX_ANGULAR_SPEED_RADPS,
-    ReconMovementSkill,
-    SkillResult,
-)
 
 BroadcastFn = Callable[[dict], Awaitable[None]]
 
@@ -27,20 +20,10 @@ AUTONOMY_ENABLE_COMMANDS = {"autonomy on", "enable autonomy", "auto on"}
 AUTONOMY_DISABLE_COMMANDS = {"autonomy off", "disable autonomy", "auto off"}
 
 
-
-@dataclass(frozen=True)
-class SkillRoute:
-    action: str
-    target: str = ""
-    distance_m: float = 0.5
-    max_duration_s: float = 20.0
-
-
 @dataclass(frozen=True)
 class CommandRoute:
     kind: str
     text: str
-    skill: SkillRoute | None = None
 
 
 def normalize_command(text: str) -> str:
@@ -73,59 +56,7 @@ def route_command(text: str) -> CommandRoute:
         return CommandRoute("stop", "Autonomy already disabled; holding position")
     if command == "abort":
         return CommandRoute("stop", "Abort received; holding position")
-    if _is_scan(command):
-        return CommandRoute("skill", "Scanning area", SkillRoute("scan_room"))
-    if _is_forward(command):
-        return CommandRoute(
-            "skill",
-            "Moving forward",
-            SkillRoute(
-                "move_forward",
-                distance_m=_extract_distance_m(command),
-                max_duration_s=5.0,
-            ),
-        )
-    if _is_approach_threat(command):
-        return CommandRoute(
-            "skill",
-            "Approaching visible threat",
-            SkillRoute("approach_detected_threat", max_duration_s=10.0),
-        )
-    target = _approach_target(command)
-    if target:
-        return CommandRoute(
-            "skill",
-            f"Approaching {target}",
-            SkillRoute("approach_object", target=target, max_duration_s=10.0),
-        )
-    return CommandRoute("fallback", "Use free-form command executor")
-
-
-class MapStreamMobilityAdapter:
-    def __init__(self, node: Any, stop_event: threading.Event) -> None:
-        self._node = node
-        self._stop_event = stop_event
-
-    def rotate(self, angle: float) -> None:
-        angle = _clamp(float(angle), -math.pi / 2.0, math.pi / 2.0)
-        if abs(angle) <= 1e-3:
-            return
-        speed = math.copysign(MAX_ANGULAR_SPEED_RADPS, angle)
-        self.send_cmd_vel(0.0, speed, abs(angle) / MAX_ANGULAR_SPEED_RADPS)
-
-    def send_cmd_vel(self, linear_x: float, angular_z: float, duration: float) -> bool:
-        """Publish cmd_vel for `duration` seconds. Returns True if motion was published."""
-        duration = max(0.0, min(float(duration), 2.0))
-        deadline = time.time() + duration
-        published = False
-        while time.time() < deadline and not self._stop_event.is_set():
-            if linear_x > 0 and _blocked_ahead(self._node):
-                break
-            self._node.publish_twist(linear_x, angular_z)
-            published = True
-            time.sleep(0.1)
-        self._node.publish_twist(0.0, 0.0)
-        return published
+    return CommandRoute("fallback", "Forward to brain agent")
 
 
 class ReconCommandRouter:
@@ -151,9 +82,6 @@ class ReconCommandRouter:
             else:
                 await self._broadcast({"phase": "error", "text": "TTS unavailable — set ELEVENLABS_API_KEY"})
             return True
-        if route.kind == "skill" and route.skill is not None:
-            await self._start_skill(route)
-            return True
         return False
 
     async def stop(self, message: str = "stop requested", silent: bool = False) -> None:
@@ -168,112 +96,3 @@ class ReconCommandRouter:
             pass
         if not silent:
             await self._broadcast({"phase": "idle", "text": message})
-
-    async def _start_skill(self, route: CommandRoute) -> None:
-        if self._task is not None and not self._task.done():
-            await self._broadcast(
-                {"phase": "error", "text": "busy — wait for current skill to finish"}
-            )
-            return
-        self._stop_event.clear()
-        await self._broadcast({"phase": "executing", "text": route.text})
-        loop = asyncio.get_running_loop()
-        self._task = loop.create_task(self._run_skill(route))
-
-    async def _run_skill(self, route: CommandRoute) -> None:
-        assert route.skill is not None
-        loop = asyncio.get_running_loop()
-        message, status = await loop.run_in_executor(None, self._execute_skill, route.skill)
-        if self._stop_event.is_set():
-            await self._broadcast({"phase": "idle", "text": "movement cancelled"})
-            return
-        phase = "done" if status == SkillResult.SUCCESS else "error"
-        await self._broadcast({"phase": phase, "text": str(message)})
-
-    def _execute_skill(self, route: SkillRoute):
-        skill = ReconMovementSkill(
-            analyzer=lambda _image: self._node.get_vlm_result() or {},
-            sleeper=self._sleep,
-        )
-        skill.mobility = MapStreamMobilityAdapter(self._node, self._stop_event)
-        skill.image = self._node.get_image_b64()
-        return skill.execute(
-            route.action,
-            target=route.target,
-            distance_m=route.distance_m,
-            max_duration_s=route.max_duration_s,
-        )
-
-    def _sleep(self, duration: float) -> None:
-        deadline = time.time() + max(0.0, float(duration))
-        while time.time() < deadline and not self._stop_event.is_set():
-            time.sleep(min(0.1, deadline - time.time()))
-
-
-def _is_scan(command: str) -> bool:
-    return any(
-        phrase in command
-        for phrase in (
-            "scan",
-            "sweep",
-            "look around",
-            "survey",
-            "inspect area",
-            "inspect room",
-        )
-    )
-
-
-def _is_forward(command: str) -> bool:
-    return command in {"forward", "go forward", "move forward", "ahead", "go ahead"} or (
-        "forward" in command and not _is_approach_threat(command)
-    )
-
-
-def _is_approach_threat(command: str) -> bool:
-    return any(
-        phrase in command
-        for phrase in (
-            "approach device",
-            "approach threat",
-            "approach the device",
-            "approach the threat",
-            "inspect device",
-            "inspect the device",
-            "inspect threat",
-            "go to device",
-            "move to device",
-        )
-    )
-
-
-def _approach_target(command: str) -> str:
-    patterns = (
-        r"^(?:approach|inspect|go to|move to|move toward|go toward)\s+(?:the\s+)?(.+)$",
-    )
-    for pattern in patterns:
-        match = re.match(pattern, command)
-        if match:
-            target = match.group(1).strip()
-            if target and target not in {"area", "room"}:
-                return target
-    return ""
-
-
-def _extract_distance_m(command: str) -> float:
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(m|meter|meters)?\b", command)
-    if not match:
-        return 0.5
-    return _clamp(float(match.group(1)), 0.1, 1.0)
-
-
-def _blocked_ahead(node: Any) -> bool:
-    try:
-        min_range = node.get_min_forward_range()
-    except Exception:
-        return False
-    return min_range is not None and min_range < 0.5
-
-
-def _clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))

@@ -146,6 +146,15 @@ class MapStreamNode(Node):
         # /defusal_action publisher — operator wire-cut / switch commands.
         self._defusal_action_pub = self.create_publisher(String, "/defusal_action", 10)
 
+        # Brain agent chat bridge — dashboard commands → PEAS cloud agent.
+        self._chat_in_pub = self.create_publisher(String, "/brain/chat_in", 10)
+        self._set_directive_pub = self.create_publisher(String, "/brain/set_directive", 10)
+        self._chat_out_queue = None   # asyncio.Queue, set by set_chat_loop()
+        self._chat_out_loop = None    # asyncio event loop, set by set_chat_loop()
+        self._active_directive: str | None = None
+        self.create_subscription(String, "/brain/chat_out", self._chat_out_cb, 10)
+        self.create_subscription(String, "/brain/skill_status_update", self._skill_status_cb, 10)
+
         # Pose sources we accept, in order of preference. slam_toolbox's
         # /pose is the authoritative map-frame pose during mapping. Subscribe
         # to all in case any of them is the live one in the current mode.
@@ -184,6 +193,58 @@ class MapStreamNode(Node):
         if camera_info_topic:
             msg += f", {camera_info_topic}"
         self.get_logger().info(msg)
+
+    # ------------------------------------------------------------------
+    # Brain agent bridge helpers
+    # ------------------------------------------------------------------
+
+    def set_chat_loop(self, queue, loop) -> None:
+        """Wire the async queue used to hand chat_out messages to the WS loop."""
+        self._chat_out_queue = queue
+        self._chat_out_loop = loop
+
+    def activate_agent(self, directive: str) -> None:
+        """Publish to /brain/set_directive to switch to the given agent."""
+        if self._active_directive == directive:
+            return
+        from std_msgs.msg import String  # noqa: PLC0415
+        self._set_directive_pub.publish(String(data=directive))
+        self._active_directive = directive
+        self.get_logger().info(f"[brain] activated directive: {directive}")
+
+    def publish_chat_in(self, text: str) -> None:
+        """Forward operator text to the active PEAS agent via /brain/chat_in."""
+        from std_msgs.msg import String  # noqa: PLC0415
+        import json as _json
+        self._chat_in_pub.publish(String(data=_json.dumps({"text": text})))
+
+    def _chat_out_cb(self, msg) -> None:
+        """ROS callback — push brain/chat_out to the async WS queue."""
+        if not self._chat_out_queue or not self._chat_out_loop:
+            return
+        try:
+            import json as _json
+            data = _json.loads(msg.data)
+        except Exception:
+            return
+        self._chat_out_loop.call_soon_threadsafe(self._chat_out_queue.put_nowait, data)
+
+    def _skill_status_cb(self, msg) -> None:
+        """ROS callback — push skill status updates to the async WS queue."""
+        if not self._chat_out_queue or not self._chat_out_loop:
+            return
+        try:
+            import json as _json
+            data = _json.loads(msg.data)
+            # Wrap as a skill_status entry so the drainer can distinguish it.
+            data.setdefault("sender", "skill_status")
+        except Exception:
+            return
+        self._chat_out_loop.call_soon_threadsafe(self._chat_out_queue.put_nowait, data)
+
+    # ------------------------------------------------------------------
+    # Pose tracking
+    # ------------------------------------------------------------------
 
     def _store_pose(self, x: float, y: float, theta: float, source: str) -> None:
         with self._lock:
@@ -758,6 +819,31 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
     await command_executor.start()
     command_router = ReconCommandRouter(node, broadcast_status)
 
+    # Brain chat bridge — receives /brain/chat_out from the ROS callback thread
+    # and broadcasts it to all dashboard WebSocket clients.
+    chat_out_queue: asyncio.Queue = asyncio.Queue()
+    node.set_chat_loop(chat_out_queue, asyncio.get_event_loop())
+
+    async def brain_chat_drainer() -> None:
+        while True:
+            entry = await chat_out_queue.get()
+            sender = entry.get("sender", "robot")
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            # Map sender → dashboard phase.
+            if sender in ("robot_thoughts", "robot_anticipation"):
+                phase = "planning"
+            elif sender == "skill_status":
+                phase = "executing"
+            elif sender == "system":
+                phase = "done"
+            else:
+                phase = "bot"
+            await broadcast_status({"phase": phase, "text": text})
+
+    asyncio.create_task(brain_chat_drainer())
+
     def process_request(connection, request):
         """Return an HTTP Response for non-WebSocket requests (static files).
 
@@ -840,9 +926,10 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                         await broadcast_status({"phase": "error", "text": status})
                         continue
 
-                    node.set_autonomy(False)
-                    node.stop_manual_motion()
-                    await command_executor.submit(text)
+                    # Route to the PEAS cloud agent (recon_agent) via brain/chat_in.
+                    node.activate_agent("recon_agent")
+                    node.publish_chat_in(text)
+                    await broadcast_status({"phase": "planning", "text": f"→ {text}"})
                 elif msg.get("type") == "stop":
                     node.set_autonomy(False)
                     node.stop_manual_motion()
