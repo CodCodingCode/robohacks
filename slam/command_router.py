@@ -18,6 +18,7 @@ BroadcastFn = Callable[[dict], Awaitable[None]]
 STOP_COMMANDS = {"stop", "halt", "emergency stop", "e stop", "estop", "hold", "pause"}
 AUTONOMY_ENABLE_COMMANDS = {"autonomy on", "enable autonomy", "auto on"}
 AUTONOMY_DISABLE_COMMANDS = {"autonomy off", "disable autonomy", "auto off"}
+CLEAR_MAP_COMMANDS = {"clear map", "reset map", "clear markers", "reset markers"}
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ def route_command(text: str) -> CommandRoute:
         return CommandRoute("stop", "Autonomy already disabled; holding position")
     if command == "abort":
         return CommandRoute("stop", "Abort received; holding position")
+    if command in CLEAR_MAP_COMMANDS:
+        return CommandRoute("clear_map", "Map annotations cleared")
     return CommandRoute("fallback", "Forward to brain agent")
 
 
@@ -81,6 +84,11 @@ class ReconCommandRouter:
                 await self._broadcast({"phase": "done", "text": f'Speaking: "{route.text}"'})
             else:
                 await self._broadcast({"phase": "error", "text": "TTS unavailable — set ELEVENLABS_API_KEY"})
+            return True
+        if route.kind == "clear_map":
+            if node is not None:
+                node.clear_persistent_markers()
+            await self._broadcast({"phase": "done", "text": route.text})
             return True
         return False
 

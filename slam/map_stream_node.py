@@ -128,6 +128,14 @@ class MapStreamNode(Node):
         # Semantic marker cache — recomputed only when _vlm_result_ts changes.
         self._cached_markers: list = []
         self._cached_markers_ts: float = 0.0
+        # Persistent object store — accumulates VLM detections across frames.
+        # Keyed by stable_marker_id(); never auto-expires. Reset via clear_persistent_markers().
+        self._persistent_markers: dict[str, dict] = {}
+        # One-time diagnostic flags so we only log missing topics once.
+        self._warned_no_map: bool = False
+        self._warned_no_depth: bool = False
+        self._warned_no_camera_info: bool = False
+        self._start_time: float = time.time()
         # Autonomy: operator-controlled toggle for planner execution.
         self._autonomy_enabled: bool = False
         self._pending_cmd: dict = {}  # {"kind": str, "reason": str}
@@ -243,6 +251,67 @@ class MapStreamNode(Node):
         self._chat_out_loop.call_soon_threadsafe(self._chat_out_queue.put_nowait, data)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Persistent object store
+    # ------------------------------------------------------------------
+
+    def _merge_into_store(self, new_markers: list[dict]) -> None:
+        """Merge freshly-projected markers into the persistent store (lock held by caller)."""
+        for m in new_markers:
+            mid = m.get("id") or ""
+            if not mid:
+                continue
+            existing = self._persistent_markers.get(mid)
+            if existing is None:
+                self._persistent_markers[mid] = dict(m)
+            else:
+                # EMA position update so the dot drifts toward new observations.
+                existing["x"] = 0.7 * existing["x"] + 0.3 * m["x"]
+                existing["y"] = 0.7 * existing["y"] + 0.3 * m["y"]
+                existing["depth_m"] = m.get("depth_m", existing.get("depth_m"))
+                existing["last_seen"] = m.get("last_seen", existing.get("last_seen"))
+                existing["source"] = m.get("source", existing.get("source"))
+
+    def get_persistent_markers(self) -> list[dict]:
+        with self._lock:
+            return list(self._persistent_markers.values())
+
+    def clear_persistent_markers(self) -> None:
+        with self._lock:
+            self._persistent_markers.clear()
+        self.get_logger().info("persistent marker store cleared")
+
+    # ------------------------------------------------------------------
+    # Diagnostic helpers
+    # ------------------------------------------------------------------
+
+    def _check_diagnostics(self) -> None:
+        """Log one-time warnings for missing sensor topics after startup."""
+        elapsed = time.time() - self._start_time
+        if elapsed < 10.0:
+            return
+        with self._lock:
+            has_map = self._last_map is not None
+            has_depth = self._last_depth_m is not None
+            has_cam = self._camera_info is not None
+
+        if not has_map and not self._warned_no_map:
+            self._warned_no_map = True
+            self.get_logger().warn(
+                "no /map received — SLAM not running; occupancy grid will be empty"
+            )
+        if not has_depth and not self._warned_no_depth:
+            self._warned_no_depth = True
+            self.get_logger().warn(
+                "no depth image received — VLM markers will use assumed depths"
+            )
+        if not has_cam and not self._warned_no_camera_info:
+            self._warned_no_camera_info = True
+            self.get_logger().warn(
+                "no camera_info received — VLM bearing uses fallback FOV estimate"
+            )
+
+    # ------------------------------------------------------------------
     # Pose tracking
     # ------------------------------------------------------------------
 
@@ -342,9 +411,25 @@ class MapStreamNode(Node):
             return base64.b64encode(self._last_image_bytes).decode()
 
     def set_vlm_result(self, result: dict) -> None:
+        now = time.time()
         with self._lock:
             self._vlm_result = result
-            self._vlm_result_ts = time.time()
+            self._vlm_result_ts = now
+            annotations = result.get("annotations", [])
+            depth_m = self._last_depth_m
+            pose = self._pose
+            camera_info = dict(self._camera_info) if self._camera_info else None
+
+        if pose is not None and annotations:
+            new_markers = markers_from_annotations(
+                annotations,
+                depth_m,
+                pose,
+                camera_info=camera_info,
+                now=now,
+            )
+            with self._lock:
+                self._merge_into_store(new_markers)
 
     def get_vlm_result(self) -> dict:
         with self._lock:
@@ -974,8 +1059,9 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
             if vlm and vlm_ts > last_vlm_push_ts:
                 payload.update(vlm)
                 last_vlm_push_ts = vlm_ts
-            payload["semantic_markers"] = node.get_semantic_markers(now)
+            payload["semantic_markers"] = node.get_persistent_markers()
             payload["autonomy"] = node.get_planner_state()
+            node._check_diagnostics()
             # Only consume the alert when there are clients — if no browser is
             # connected the alert would be cleared and permanently lost.
             alert = node.get_and_clear_alert() if clients else None

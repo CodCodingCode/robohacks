@@ -10,6 +10,32 @@ import numpy as np
 DEFAULT_CAMERA_FOV_RAD = 1.2
 MAX_DEPTH_M = 6.5
 
+# Assumed depth per category when no depth image is available.
+ASSUMED_DEPTH_M: dict[str, float] = {
+    "person": 2.0,
+    "threat": 1.5,
+    "door": 3.0,
+    "object": 2.0,
+    "furniture": 1.5,
+    "window": 2.5,
+}
+
+
+def assumed_depth_for_category(category: str) -> float:
+    """Return a plausible depth (metres) for a detection with no depth image."""
+    return ASSUMED_DEPTH_M.get(str(category or "object").lower(), 2.0)
+
+
+def stable_marker_id(label: str, x: float, y: float, cell_size: float = 0.5) -> str:
+    """Stable string ID for an object at world position (x, y).
+
+    Two detections of the same label within *cell_size* metres of each other
+    will produce the same ID, enabling cross-frame deduplication.
+    """
+    gx = round(x / cell_size)
+    gy = round(y / cell_size)
+    return f"{label}@{gx},{gy}"
+
 
 def camera_info_to_dict(msg: Any | None) -> dict | None:
     """Return the small CameraInfo subset needed by projection helpers."""
@@ -106,33 +132,57 @@ def bbox_bearing_rad(
 
 def marker_from_annotation(
     annotation: dict,
-    depth_m: np.ndarray,
+    depth_m: np.ndarray | None,
     pose: tuple[float, float, float],
     camera_info: dict | None = None,
     marker_id: int | str | None = None,
     now: float | None = None,
 ) -> dict | None:
-    """Project one VLM annotation into a dashboard map marker."""
+    """Project one VLM annotation into a dashboard map marker.
+
+    Falls back to an assumed depth when *depth_m* is None or the depth
+    image has no valid pixels at the bbox location, so markers always
+    appear on the map regardless of whether a depth camera is connected.
+    """
     bbox = annotation.get("bbox")
-    depth = sample_depth_at_bbox(depth_m, bbox)
+    category = annotation.get("category", "object")
+    label = annotation.get("label", "object")
+
+    # Determine depth and source.
+    source = "vlm_depth"
+    if depth_m is not None:
+        depth = sample_depth_at_bbox(depth_m, bbox)
+        image_width = depth_m.shape[1]
+    else:
+        depth = None
+        image_width = int((camera_info or {}).get("width") or 1000)
+
     if depth is None:
-        return None
-    bearing = bbox_bearing_rad(bbox, depth_m.shape[1], camera_info)
+        depth = assumed_depth_for_category(category)
+        source = "vlm_assumed"
+
+    bearing = bbox_bearing_rad(bbox, image_width, camera_info)
     if bearing is None:
         return None
 
     robot_x, robot_y, robot_theta = pose
     world_angle = robot_theta + bearing
+    wx = robot_x + depth * math.cos(world_angle)
+    wy = robot_y + depth * math.sin(world_angle)
+
+    if marker_id is None:
+        marker_id = stable_marker_id(label, wx, wy)
+
     marker = {
-        "id": marker_id if marker_id is not None else annotation.get("label", "object"),
-        "label": annotation.get("label", "object"),
-        "category": annotation.get("category", "object"),
-        "x": robot_x + depth * math.cos(world_angle),
-        "y": robot_y + depth * math.sin(world_angle),
+        "id": marker_id,
+        "label": label,
+        "category": category,
+        "x": wx,
+        "y": wy,
         "depth_m": depth,
         "bearing_rad": bearing,
         "confidence": float(annotation.get("confidence", 0.7) or 0.7),
-        "source": "vlm_depth",
+        "source": source,
     }
     if now is not None:
         marker["last_seen"] = now
@@ -146,10 +196,14 @@ def markers_from_annotations(
     camera_info: dict | None = None,
     now: float | None = None,
 ) -> list[dict]:
-    if depth_m is None or pose is None or not isinstance(annotations, list):
+    """Project all VLM annotations to world-frame markers.
+
+    Works with *depth_m=None* — falls back to assumed depths per category.
+    """
+    if pose is None or not isinstance(annotations, list):
         return []
     markers = []
-    for idx, annotation in enumerate(annotations):
+    for annotation in annotations:
         if not isinstance(annotation, dict):
             continue
         marker = marker_from_annotation(
@@ -157,7 +211,6 @@ def markers_from_annotations(
             depth_m,
             pose,
             camera_info=camera_info,
-            marker_id=f"vlm-depth-{idx}",
             now=now,
         )
         if marker is not None:
