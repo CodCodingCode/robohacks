@@ -26,7 +26,7 @@ class ReconAgent(Agent):
         return ["recon_movement", "yellow"]
 
     def get_inputs(self) -> List[str]:
-        return ["micro"]
+        return []
 
     def get_prompt(self) -> str:
         return """
