@@ -318,10 +318,31 @@ class ReconCommandRouter:
         except Exception:
             pass
 
-        # Start a background thread that continuously syncs depth + camera_info
-        # from map_stream_node's already-running subscriptions into the skill's
-        # module-level depth cache, bypassing the duplicate rclpy subscriber.
-        depth_stop = threading.Event()
+        # Start background threads that continuously sync VLM + depth data
+        # from map_stream_node into the skill's module-level caches.
+        sync_stop = threading.Event()
+
+        def _sync_vlm():
+            """Keep VLM annotation cache fresh so bearing doesn't go stale."""
+            while not sync_stop.is_set():
+                try:
+                    vlm_result = self._node.get_vlm_result() or {}
+                    annotations = vlm_result.get("annotations", [])
+                    if annotations:
+                        with _rm._vlm_cache_lock:
+                            _rm._vlm_cache.update({
+                                "annotations": annotations,
+                                "ts": time.time(),
+                            })
+                except Exception:
+                    pass
+                time.sleep(0.5)  # 2Hz — VLM updates every ~3s anyway
+
+        vlm_thread = threading.Thread(target=_sync_vlm, daemon=True,
+                                       name="vlm_sync")
+        vlm_thread.start()
+
+        depth_stop = sync_stop  # reuse the same event for both threads
 
         def _sync_depth():
             while not depth_stop.is_set():

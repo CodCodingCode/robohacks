@@ -716,7 +716,7 @@ class ReconMovementSkill(Skill):
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
             # ── Get latest VLM annotation (cache preferred) ───────────────
-            cached = _get_cached_annotations(max_age_s=5.0)
+            cached = _get_cached_annotations(max_age_s=2.5)
             if cached is not None:
                 result = {"annotations": cached}
             else:
