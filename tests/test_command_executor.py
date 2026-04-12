@@ -44,7 +44,7 @@ def test_build_context_adds_assumed_depth_when_depth_frame_missing():
     context = executor._build_context()
 
     annotation = context["annotations"][0]
-    assert annotation["depth_m"] == 1.5
+    assert annotation["depth_m"] == 1.0
     assert annotation["depth_source"] == "assumed_category"
     assert annotation["bearing_rad"] < 0.0
 

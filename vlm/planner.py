@@ -74,7 +74,7 @@ class MissionPlanner:
     CLOSE_ENOUGH_M: float = 0.20
     RECON_STEP_RAD: float = math.pi / 4
     RECON_STEPS_TOTAL: int = 8
-    APPROACH_SPEED: float = 0.15
+    APPROACH_SPEED: float = 0.20
     APPROACH_DURATION: float = 2.5
     REACQUIRE_SPEED: float = 0.4
     ADVANCE_SPEED: float = 0.15

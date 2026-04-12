@@ -433,6 +433,7 @@ class ReconMovementSkill(Skill):
         self._sleep = sleeper
         self._cancelled = False
         self._search_dir: int = 0   # consecutive miss counter; resets on annotation found
+        self._prev_bearing: float | None = None  # EMA bearing smoother
 
     @property
     def name(self) -> str:
@@ -701,10 +702,10 @@ class ReconMovementSkill(Skill):
         the robot circling away from the target indefinitely.
         """
         # --- tunables --------------------------------------------------------
-        STEP_S    = 0.4    # seconds per sensor step (short = frequent re-eval)
-        ALIGN_TOL = 0.20   # rad (~11.5°) — wider dead-zone so robot drives forward sooner
+        STEP_S    = 1.2    # seconds per step (was 0.4 — too choppy, caused jitter)
+        ALIGN_TOL = 0.15   # rad (~8.6°) — tighter alignment for smoother driving
         CLOSE_M   = 0.35   # depth-based stop distance (metres)
-        Kp        = 1.0    # gentler gain reduces bearing overshoot oscillation
+        Kp        = 0.8    # softer gain — less overshoot on bearing corrections
         # ---------------------------------------------------------------------
 
         remaining = max_duration
@@ -715,7 +716,7 @@ class ReconMovementSkill(Skill):
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
             # ── Get latest VLM annotation (cache preferred) ───────────────
-            cached = _get_cached_annotations(max_age_s=2.5)
+            cached = _get_cached_annotations(max_age_s=5.0)
             if cached is not None:
                 result = {"annotations": cached}
             else:
@@ -761,16 +762,28 @@ class ReconMovementSkill(Skill):
             depth   = _get_depth_at_bbox(bbox)   # metres, or None (falls back to size proxy)
             bearing = _get_bearing_rad(bbox)      # rad, camera-intrinsics preferred
 
+            # Smooth bearing with EMA to dampen bbox jitter between frames
+            if self._prev_bearing is not None:
+                bearing = 0.6 * bearing + 0.4 * self._prev_bearing
+            self._prev_bearing = bearing
+
             # ── Arrival check ─────────────────────────────────────────────
             if depth is not None and depth <= CLOSE_M:
                 _publish_approach_state(bbox, depth, bearing, "arrived", _get_min_forward_m())
                 self._stop()
                 return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
-            _, size_proxy = bbox_to_bearing(bbox)
-            if size_proxy >= self._planner.CLOSE_ENOUGH:
-                _publish_approach_state(bbox, depth, bearing, "arrived", _get_min_forward_m())
-                self._stop()
-                return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
+            # Fallback: estimate depth from bbox when camera depth unavailable
+            if depth is None:
+                from slam.depth_fusion import estimate_depth_from_bbox  # noqa: PLC0415
+                est_depth, _ = estimate_depth_from_bbox(bbox, annotation.get("category", "object"))
+                # Also check raw size proxy — very large bboxes mean object is
+                # right in front even if the model's depth estimate is conservative.
+                _, size_proxy = bbox_to_bearing(bbox)
+                if est_depth <= CLOSE_M or size_proxy >= self._planner.CLOSE_ENOUGH:
+                    _publish_approach_state(bbox, est_depth, bearing, "arrived", _get_min_forward_m())
+                    self._stop()
+                    return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
+                depth = est_depth  # use estimated depth for speed_scale below
 
             # ── Obstacle check ───────────────────────────────────────────
             fwd = _get_min_forward_m()
@@ -786,24 +799,19 @@ class ReconMovementSkill(Skill):
             if abs(bearing) > ALIGN_TOL:
                 # Rotate to center the target; gentle forward motion while correcting.
                 angular_z = _bearing_to_angular_z(bearing, gain=Kp)
-                forward_scale = max(0.3, 1.0 - abs(bearing) / (math.pi / 3.0))
+                forward_scale = max(0.5, 1.0 - abs(bearing) / (math.pi / 2.0))
                 linear_x = self._planner.APPROACH_SPEED * forward_scale
-                dist_label = f"depth={depth:.2f}m" if depth is not None else f"size={size_proxy:.3f}"
                 self._feedback(
                     f"Aligning to {target} "
-                    f"(bearing={bearing:+.2f} rad, {dist_label})"
+                    f"(bearing={bearing:+.2f} rad, depth={depth:.2f}m)"
                 )
                 _publish_approach_state(bbox, depth, bearing, "aligning", fwd)
             else:
                 # Heading is good — drive straight; slow down when close.
-                if depth is not None:
-                    speed_scale = min(1.0, max(0.4, (depth - CLOSE_M) / 1.0))
-                else:
-                    speed_scale = 0.7
+                speed_scale = min(1.0, max(0.4, (depth - CLOSE_M) / 1.0))
                 linear_x = self._planner.APPROACH_SPEED * speed_scale
                 angular_z = 0.0
-                dist_label = f"depth={depth:.2f}m" if depth is not None else f"size={size_proxy:.3f}"
-                self._feedback(f"Driving to {target} ({dist_label})")
+                self._feedback(f"Driving to {target} (depth={depth:.2f}m)")
                 _publish_approach_state(bbox, depth, bearing, "driving", fwd)
 
             self.mobility.send_cmd_vel(linear_x, angular_z, dur)

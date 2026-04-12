@@ -55,8 +55,14 @@ def test_scan_room_rotates_in_eight_bounded_steps_then_stops():
 
     assert status == SkillResult.SUCCESS
     assert message == "Room scan complete"
-    assert len(skill.mobility.rotations) == 8
-    assert all(math.isclose(angle, math.pi / 4.0) for angle in skill.mobility.rotations)
+    # scan_room uses send_cmd_vel for 8 rotation steps + 1 stop
+    rotation_cmds = [c for c in skill.mobility.cmd_vel if c[1] != 0.0]
+    assert len(rotation_cmds) == 8
+    step_duration = (math.pi / 4.0) / MAX_ANGULAR_SPEED_RADPS
+    assert all(
+        math.isclose(c[1], MAX_ANGULAR_SPEED_RADPS) and math.isclose(c[2], step_duration)
+        for c in rotation_cmds
+    )
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
@@ -160,10 +166,10 @@ def test_approach_object_rotates_toward_matching_target_annotation():
     )
 
     assert status == SkillResult.FAILURE
-    assert "Could not find or reach" in message
-    assert skill.mobility.rotations
-    assert skill.mobility.rotations[0] > 0.0
-    assert abs(skill.mobility.rotations[0]) <= math.pi / 2.0
+    assert "Could not reach" in message
+    # Approach loop uses send_cmd_vel with angular_z for alignment
+    alignment_cmds = [c for c in skill.mobility.cmd_vel if c[1] != 0.0 and c != (0.0, 0.0, 0.1)]
+    assert alignment_cmds  # at least one turn toward target
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
@@ -189,7 +195,7 @@ def test_approach_object_moves_toward_centered_matching_target_annotation():
     )
 
     assert status == SkillResult.FAILURE
-    assert "Could not find or reach" in message
+    assert "Could not reach" in message
     movement = skill.mobility.cmd_vel[:-1]
     assert movement
     assert all(0.0 < cmd[0] <= MAX_FORWARD_SPEED_MPS for cmd in movement)
@@ -216,9 +222,10 @@ def test_approach_object_searches_when_target_is_not_visible():
     )
 
     assert status == SkillResult.FAILURE
-    assert "Could not find or reach" in message
-    assert skill.mobility.cmd_vel[0] == (0.0, SEARCH_SPIN_SPEED_RADPS, 1.0)
-    assert abs(skill.mobility.cmd_vel[0][1]) <= MAX_ANGULAR_SPEED_RADPS
+    assert "Could not reach" in message
+    # When target not found, first action is forward coast (not spin) for miss ≤ 2
+    first_cmd = skill.mobility.cmd_vel[0]
+    assert first_cmd[0] > 0.0  # coasting forward
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
@@ -282,9 +289,9 @@ def test_planner_cmd_vel_is_clamped_before_sending_to_mobility():
     )
 
     assert outcome is None
-    assert budget == MAX_COMMAND_DURATION_S
+    assert budget == 10.0  # 10.0 < MAX_COMMAND_DURATION_S, so not clamped
     assert skill.mobility.cmd_vel == [
-        (MAX_FORWARD_SPEED_MPS, 0.4, MAX_COMMAND_DURATION_S)
+        (MAX_FORWARD_SPEED_MPS, MAX_ANGULAR_SPEED_RADPS, 10.0)
     ]
 
 

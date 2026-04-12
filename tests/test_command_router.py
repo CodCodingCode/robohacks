@@ -30,22 +30,25 @@ def test_move_left_routes_to_lateral_skill_with_distance():
     assert route.distance_m == 0.25
 
 
-def test_approach_device_falls_back_to_brain_agent():
+def test_approach_device_routes_locally():
     route = route_command("approach the device")
 
-    assert route.kind == "fallback"
+    assert route.kind == "approach_target"
+    assert route.target == "device"
 
 
-def test_approach_named_object_falls_back_to_brain_agent():
+def test_approach_named_object_routes_locally():
     route = route_command("inspect the backpack")
 
-    assert route.kind == "fallback"
+    assert route.kind == "approach_target"
+    assert route.target == "backpack"
 
 
-def test_move_towards_person_falls_back_to_brain_agent():
+def test_move_towards_person_routes_locally():
     route = route_command("Move towards person")
 
-    assert route.kind == "fallback"
+    assert route.kind == "approach_target"
+    assert route.target == "person"
 
 
 def test_defusal_manipulation_falls_back_to_brain_agent():
