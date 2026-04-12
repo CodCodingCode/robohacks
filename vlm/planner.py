@@ -71,7 +71,7 @@ class MissionPlanner:
 
     BEARING_TOLERANCE: float = 0.10
     CLOSE_ENOUGH: float = 0.35
-    CLOSE_ENOUGH_M: float = 0.15
+    CLOSE_ENOUGH_M: float = 0.20
     RECON_STEP_RAD: float = math.pi / 4
     RECON_STEPS_TOTAL: int = 8
     APPROACH_SPEED: float = 0.15
