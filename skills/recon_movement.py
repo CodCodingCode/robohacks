@@ -180,6 +180,9 @@ def _try_start_depth_subscriber() -> None:
     try:
         import rclpy                                       # noqa: PLC0415
         from sensor_msgs.msg import Image, CameraInfo     # noqa: PLC0415
+        from rclpy.qos import (                            # noqa: PLC0415
+            QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy,
+        )
         from slam.depth_fusion import (                   # noqa: PLC0415
             decode_depth_image,
             camera_info_to_dict,
@@ -189,6 +192,13 @@ def _try_start_depth_subscriber() -> None:
             return
 
         node = rclpy.create_node("recon_movement_depth_listener")
+
+        # Camera driver publishes with BEST_EFFORT — must match.
+        _sensor_qos = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
 
         def _depth_cb(msg: Image) -> None:
             global _depth_image
@@ -213,8 +223,8 @@ def _try_start_depth_subscriber() -> None:
             except Exception:
                 pass
 
-        node.create_subscription(Image, _DEPTH_TOPIC, _depth_cb, 10)
-        node.create_subscription(CameraInfo, _CAM_INFO_TOPIC, _cam_info_cb, 10)
+        node.create_subscription(Image, _DEPTH_TOPIC, _depth_cb, _sensor_qos)
+        node.create_subscription(CameraInfo, _CAM_INFO_TOPIC, _cam_info_cb, _sensor_qos)
         t = threading.Thread(
             target=lambda n=node: _spin_node(n),
             daemon=True,
@@ -703,9 +713,9 @@ class ReconMovementSkill(Skill):
         """
         # --- tunables --------------------------------------------------------
         STEP_S    = 0.4    # seconds per sensor step
-        ALIGN_TOL = 0.15   # rad (~8.6°) — wide dead-zone; bbox bearing is noisy without depth camera
+        ALIGN_TOL = 0.08   # rad (~4.6°) — tight; bearing is accurate with cam intrinsics
         CLOSE_M   = 0.45   # depth-based stop distance (metres)
-        Kp        = 0.6    # bearing → angular_z gain (no depth camera = noisy bearing, keep gentle)
+        Kp        = 1.0    # moderate gain; depth camera gives stable bearing
         # ---------------------------------------------------------------------
 
         remaining = max_duration

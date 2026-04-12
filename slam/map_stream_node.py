@@ -380,16 +380,22 @@ class MapStreamNode(Node):
         self.create_subscription(OccupancyGrid, "/map", self._map_cb, map_qos)
         self.create_subscription(BatteryState, "/battery_state", self._battery_cb, 10)
         self.create_subscription(LaserScan, "/scan", self._scan_cb, 10)
+        # Camera driver publishes with BEST_EFFORT QoS — must match.
+        _sensor_qos = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
         self.create_subscription(
             Image,
             "/mars/main_camera/left/image_raw",
             self._image_cb,
-            10,
+            _sensor_qos,
         )
         if depth_topic:
-            self.create_subscription(Image, depth_topic, self._depth_cb, 10)
+            self.create_subscription(Image, depth_topic, self._depth_cb, _sensor_qos)
         if camera_info_topic:
-            self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, 10)
+            self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, _sensor_qos)
         self.create_subscription(
             String, "/recon/approach_state", self._approach_state_cb, 10
         )
@@ -1020,13 +1026,26 @@ class MapStreamNode(Node):
         self.get_logger().info(f"defusal action published: {action}")
 
     def speak(self, text: str) -> bool:
-        """Speak text via ElevenLabs TTS. Returns False if TTS is unavailable."""
+        """Speak text via ElevenLabs TTS, falling back to espeak if unavailable."""
         with self._lock:
             tts = self._tts
-        if tts is None:
+        if tts is not None:
+            tts.speak_async(text)
+            return True
+        # Fallback: espeak-ng / espeak (available on Jetson/Ubuntu by default).
+        try:
+            import subprocess as _sp  # noqa: PLC0415
+            player = "espeak-ng" if _sp.run(
+                ["which", "espeak-ng"], capture_output=True
+            ).returncode == 0 else "espeak"
+            _sp.Popen(
+                [player, "-s", "140", "-a", "200", text],
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+            )
+            return True
+        except FileNotFoundError:
             return False
-        tts.speak_async(text)
-        return True
 
     def publish_twist(self, linear_x: float, angular_z: float) -> None:
         from geometry_msgs.msg import Twist  # noqa: PLC0415
