@@ -260,11 +260,16 @@ def _normalize_annotations(raw_annotations: list) -> list:
         bbox = [max(0, min(1000, int(v))) for v in bbox]
         category = a.get("category", "object")
         label = "bomb" if category == "threat" else a.get("label", "unknown")
-        out.append({
+        ann = {
             "label": label,
             "bbox": bbox,
             "category": category,
-        })
+        }
+        if "spatial_layer" in a:
+            ann["spatial_layer"] = a["spatial_layer"]
+        if "occluded" in a:
+            ann["occluded"] = bool(a["occluded"])
+        out.append(ann)
     return out
 
 

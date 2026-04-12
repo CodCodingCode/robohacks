@@ -51,7 +51,9 @@ def recon_prompt() -> tuple[str, str]:
         "    {\n"
         '      "label": "<what it is, e.g. person, desk, suspicious backpack>",\n'
         '      "bbox": [y_min, x_min, y_max, x_max],\n'
-        '      "category": "<person | threat | object>"\n'
+        '      "category": "<person | threat | object>",\n'
+        '      "spatial_layer": "<foreground | midground | background>",\n'
+        '      "occluded": <bool, true if the object is partially hidden behind another object>\n'
         "    }\n"
         "  ],\n"
         '  "threat_detected": <bool, true if ANY item looks like an explosive device>,\n'
@@ -81,6 +83,13 @@ def recon_prompt() -> tuple[str, str]:
         f"- {_BBOX_RULE}\n"
         "- Every person and threat MUST have an annotation with a bounding box.\n"
         "- Include annotations for important objects like doors, desks, and windows too.\n"
+        "- Detect ALL instances of each object type. If multiple similar objects are "
+        "visible (e.g. two cardboard boxes), annotate EACH one separately with its own "
+        "bounding box, even if one is partially hidden behind another.\n"
+        "- For partially occluded objects, draw the bounding box around the visible "
+        "portion and set occluded=true. Use visual cues (relative size, position, "
+        "perspective) to assign spatial_layer: objects appearing smaller and higher in "
+        "frame are typically farther away (background).\n"
         f"- {_STANDOFF_RULE}\n"
         f"- {_SEMANTIC_PLAN_RULE}"
     )
