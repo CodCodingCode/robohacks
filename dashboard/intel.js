@@ -7,109 +7,65 @@
  */
 
 (function (global) {
-  const MAX_ENTRIES = 60;
-
-  // Track last seen state to detect changes worth logging.
   let _lastRoomKey = "";
   let _lastPlanAction = "";
   let _lastThreats = "";
 
-  function escapeHtml(s) {
+  const _tickerEl = () => document.getElementById("intel-ticker");
+
+  function _plain(s) {
     return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/<[^>]*>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"');
   }
 
-  function timestamp() {
-    const d = new Date();
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  function _setTicker(text) {
+    const el = _tickerEl();
+    if (!el) return;
+    el.textContent = _plain(text);
+    el.classList.add("intel-ticker-active");
   }
 
-  function appendEntry(container, text, type = "info") {
-    const entry = document.createElement("div");
-    entry.className = `intel-entry intel-${type}`;
-    entry.innerHTML =
-      `<span class="intel-ts">${timestamp()}</span>` +
-      `<span class="intel-msg">${text}</span>`;
-    container.appendChild(entry);
-
-    // Trim old entries.
-    while (container.children.length > MAX_ENTRIES) {
-      container.removeChild(container.firstChild);
-    }
-
-    // Auto-scroll to bottom.
-    container.scrollTop = container.scrollHeight;
-  }
-
-  function renderIntel(rooms, container, radarTargets) {
-    if (!container) return;
-
-    // Mark the container as initialized so downstream logic that checks
-    // for the first render still behaves the same.
-    if (!container.dataset.intelInit) {
-      container.dataset.intelInit = "1";
-    }
-
-    // Log room changes.
+  function renderIntel(rooms, _container, radarTargets) {
     const roomKey = rooms
       .map((r) => `${r.type}:${r.people}:${(r.threats || []).length}`)
       .join("|");
 
     if (roomKey && roomKey !== _lastRoomKey) {
       _lastRoomKey = roomKey;
-
-      for (const room of rooms) {
-        const hasThreat = (room.threats || []).length > 0;
-        const type = hasThreat ? "threat" : "clear";
+      const last = rooms[rooms.length - 1];
+      if (last) {
+        const hasThreat = (last.threats || []).length > 0;
         const status = hasThreat ? "⚠ THREAT" : "✓ Clear";
         const objects =
-          (room.objects || []).length
-            ? ` · ${room.objects.slice(0, 3).map(escapeHtml).join(", ")}`
+          (last.objects || []).length
+            ? " · " + last.objects.slice(0, 3).join(", ")
             : "";
-        appendEntry(
-          container,
-          `<strong>${escapeHtml(room.type)}</strong> ${status} · ${room.people || 0} people${objects}`,
-          type
-        );
-
-        for (const t of room.threats || []) {
-          appendEntry(
-            container,
-            `&nbsp;&nbsp;↳ ${escapeHtml(t.description || t.type || t)}`,
-            "threat"
-          );
-        }
+        _setTicker(`${last.type} ${status} · ${last.people || 0} people${objects}`);
       }
     }
 
-    // Log radar notes.
     if (radarTargets) {
       for (const t of radarTargets) {
         if (t.note) {
           const noteKey = `radar:${t.id}:${t.note}`;
           if (noteKey !== _lastThreats) {
             _lastThreats = noteKey;
-            appendEntry(container, `Radar ID ${t.id}: ${escapeHtml(t.note)}`, "radar");
+            _setTicker(`Radar ID ${t.id}: ${t.note}`);
           }
         }
       }
     }
   }
 
-  // Called separately from app.js for semantic plan updates.
-  function logPlanUpdate(container, plan) {
-    if (!container || !plan || !plan.next_action) return;
+  function logPlanUpdate(_container, plan) {
+    if (!plan || !plan.next_action) return;
     if (plan.next_action === _lastPlanAction) return;
     _lastPlanAction = plan.next_action;
-    appendEntry(
-      container,
-      `→ ${escapeHtml(plan.next_action)}`,
-      "plan"
-    );
+    _setTicker(`→ ${plan.next_action}`);
   }
 
   global.ReconIntel = { renderIntel, logPlanUpdate };

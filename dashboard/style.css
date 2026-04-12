@@ -4,29 +4,29 @@
  */
 
 :root {
-  --md-primary: #6200ee;
-  --md-primary-variant: #3700b3;
+  --md-primary: #4a90d9;
+  --md-primary-variant: #3a7bc8;
   --md-secondary: #03dac6;
-  --md-secondary-variant: #018786;
-  --md-bg: #ffffff;
-  --md-surface: #ffffff;
-  --md-error: #b00020;
+  --md-secondary-variant: #03dac6;
+  --md-bg: #575252;
+  --md-surface: #4a4545;
+  --md-error: #ff5252;
   --md-on-primary: #ffffff;
-  --md-on-secondary: #000000;
-  --md-on-bg: #000000;
-  --md-on-surface: #000000;
+  --md-on-secondary: #ffffff;
+  --md-on-bg: #e0e0e0;
+  --md-on-surface: #e0e0e0;
   --md-on-error: #ffffff;
 
-  --divider: rgba(0, 0, 0, 0.08);
-  --divider-strong: rgba(0, 0, 0, 0.12);
-  --surface-elevated: #fafafa;
-  --hint: rgba(0, 0, 0, 0.38);
-  --secondary-text: rgba(0, 0, 0, 0.6);
+  --divider: rgba(255, 255, 255, 0.08);
+  --divider-strong: rgba(255, 255, 255, 0.15);
+  --surface-elevated: #504b4b;
+  --hint: rgba(255, 255, 255, 0.4);
+  --secondary-text: rgba(255, 255, 255, 0.6);
 
   --font: "Roboto", system-ui, -apple-system, sans-serif;
   --radius: 4px;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-2: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-2: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 * {
@@ -79,10 +79,10 @@ body {
 }
 
 .brand-title {
-  font-weight: 500;
-  font-size: 18px;
-  letter-spacing: -0.02em;
-  color: var(--md-on-surface);
+  font-weight: 900;
+  font-size: 26px;
+  letter-spacing: 0.08em;
+  color: var(--md-primary);
 }
 
 .brand-sub {
@@ -203,7 +203,7 @@ body {
   width: 100%;
   height: 100%;
   display: block;
-  background: #fafafa;
+  background: #3e3a3a;
 }
 
 .legend {
@@ -810,8 +810,30 @@ body.defusal-active {
   font-size: 14px;
 }
 
-.footer-spacer {
+.footer-intel {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+}
+
+.intel-ticker {
+  color: var(--hint);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  letter-spacing: 0.01em;
+  transition: color 0.3s ease;
+}
+
+.intel-ticker.intel-ticker-active {
+  color: var(--secondary-text);
 }
 
 .footer-buttons {

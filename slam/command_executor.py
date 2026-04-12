@@ -32,6 +32,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from typing import Any, Callable, Coroutine
 
@@ -51,6 +52,70 @@ _MODEL = "gemini-2.5-flash"
 
 # Type aliases
 BroadcastFn = Callable[[dict], Coroutine[Any, Any, None]]
+
+
+def _extract_json(raw: str) -> dict:
+    """Best-effort JSON extraction from an LLM response.
+
+    Handles: clean JSON, markdown-fenced JSON, JSON embedded in prose,
+    and stray trailing commas.
+    """
+    text = raw.strip()
+    # 1. Try direct parse first.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Strip markdown code fences (```json ... ``` or ``` ... ```).
+    fenced = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Find the first { ... } or [ ... ] blob via brace matching.
+    start = None
+    open_char = None
+    for i, ch in enumerate(text):
+        if ch in "{[":
+            start = i
+            open_char = ch
+            break
+    if start is not None:
+        close_char = "}" if open_char == "{" else "]"
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == open_char:
+                depth += 1
+            elif text[i] == close_char:
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        # Remove trailing commas before } or ] and retry.
+                        fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
+                        try:
+                            return json.loads(fixed)
+                        except json.JSONDecodeError:
+                            break
+
+    # 4. Handle truncated JSON — extract steps even if rationale was cut off.
+    steps_match = re.search(r'"steps"\s*:\s*(\[.*?\])', text, re.DOTALL)
+    if steps_match:
+        try:
+            steps = json.loads(steps_match.group(1))
+            return {"steps": steps, "rationale": "(truncated)"}
+        except json.JSONDecodeError:
+            pass
+
+    raise PlanError(
+        f"could not parse planner JSON — raw response ({len(raw)} chars): "
+        f"{raw[:300]}"
+    )
 
 
 class PlanError(Exception):
@@ -178,6 +243,8 @@ class CommandExecutor:
 
     def _build_context(self) -> dict:
         """Snapshot everything the planner might want to ground the action."""
+        from slam.depth_fusion import bbox_bearing_rad, sample_depth_at_bbox
+
         pose, occ, _scan, bat = self.node.snapshot()
         vlm = self.node.get_vlm_result() or {}
         ctx: dict[str, Any] = {"timestamp": time.time()}
@@ -197,10 +264,37 @@ class CommandExecutor:
                     "y": info.origin.position.y,
                 },
             }
-        # Pull the same VLM fields the Intel panel renders.
-        for key in ("rooms", "annotations", "semantic_plan", "threat_detected"):
+
+        with self.node._lock:
+            depth_m = self.node._last_depth_m
+            camera_info = dict(self.node._camera_info) if self.node._camera_info else None
+
+        if camera_info:
+            ctx["camera"] = camera_info
+
+        # Pull VLM fields and enrich annotations with depth + bearing.
+        for key in ("rooms", "semantic_plan", "threat_detected"):
             if key in vlm:
                 ctx[key] = vlm[key]
+
+        annotations = vlm.get("annotations", [])
+        if annotations:
+            enriched = []
+            img_width = (camera_info or {}).get("width", 1000)
+            for ann in annotations:
+                ann = dict(ann)
+                bbox = ann.get("bbox")
+                if bbox and depth_m is not None:
+                    d = sample_depth_at_bbox(depth_m, bbox)
+                    if d is not None:
+                        ann["depth_m"] = round(d, 2)
+                if bbox:
+                    bearing = bbox_bearing_rad(bbox, img_width, camera_info)
+                    if bearing is not None:
+                        ann["bearing_rad"] = round(bearing, 3)
+                enriched.append(ann)
+            ctx["annotations"] = enriched
+
         return ctx
 
     def _plan_blocking(self, text: str) -> dict:
@@ -217,8 +311,11 @@ class CommandExecutor:
             '"wait" (seconds), "stop" (no args). '
             f"Hard caps: linear speed ≤ {MAX_LINEAR} m/s, angular ≤ {MAX_ANGULAR} rad/s, "
             f"any single step ≤ {MAX_STEP_S} s, total plan ≤ {MAX_PLAN_S} s. "
-            "Use the provided VLM scene context (rooms, annotations, semantic_plan) "
-            "and the robot's current pose to ground the instruction spatially. "
+            "Each annotation in the context may include 'bearing_rad' (angle from "
+            "camera centre, negative = right, positive = left) and 'depth_m' "
+            "(distance in metres from the depth sensor). To navigate to a detected "
+            "object: rotate by its bearing_rad, then move forward by its depth_m "
+            "(minus ~0.5 m safety margin). "
             "If the instruction is dangerous, unclear, or would exceed caps, "
             'return {"steps":[{"op":"stop"}],"rationale":"<why>"}. '
             "Respond with JSON ONLY matching: "
@@ -240,7 +337,7 @@ class CommandExecutor:
             config=types.GenerateContentConfig(
                 system_instruction=system,
                 temperature=0.1,
-                max_output_tokens=1024,
+                max_output_tokens=8192,
                 response_mime_type="application/json",
             ),
         )
@@ -249,8 +346,8 @@ class CommandExecutor:
             raise PlanError("planner returned empty response")
         try:
             data = _parse_planner_json(raw)
-        except PlanError as exc:
-            return {"steps": [{"op": "stop"}], "rationale": f"{exc}; holding position"}
+        except PlanError:
+            data = _extract_json(raw)
 
         if not isinstance(data, dict) or "steps" not in data:
             raise PlanError("planner JSON missing 'steps'")

@@ -68,7 +68,6 @@
   };
 
   const canvas = document.getElementById("tactical-map");
-  const intelEl = document.getElementById("intel-feed");
   const telemetryEl = document.getElementById("telemetry-feed");
   const connectionChip = document.getElementById("connection-chip");
   const clockEl = document.getElementById("clock");
@@ -77,7 +76,6 @@
   const threatCountEl = document.getElementById("threat-count");
   const batteryLevelEl = document.getElementById("battery-level");
   const mapMetaEl = document.getElementById("map-meta");
-  const intelMetaEl = document.getElementById("intel-meta");
   const cameraMetaEl = document.getElementById("camera-meta");
   const telemetryMetaEl = document.getElementById("telemetry-meta");
   const gripperFeedMetaEl = document.getElementById("gripper-feed-meta");
@@ -132,9 +130,6 @@
     if (mapMetaEl) {
       mapMetaEl.textContent = `Updated ${ageLabel(staleness.map)}`;
     }
-    if (intelMetaEl) {
-      intelMetaEl.textContent = `Updated ${ageLabel(staleness.intel)}`;
-    }
     if (telemetryMetaEl) {
       telemetryMetaEl.textContent = `Updated ${ageLabel(staleness.telemetry)}`;
     }
@@ -165,29 +160,19 @@
   }
 
   function renderAll() {
-    ReconIntel.renderIntel(state.rooms || [], intelEl, state.radar_targets || []);
+    ReconIntel.renderIntel(state.rooms || [], null, state.radar_targets || []);
     ReconTelemetry.renderTelemetry(state.telemetry || [], telemetryEl);
     ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     renderSemanticPlan(state.semantic_plan);
-    ReconIntel.logPlanUpdate(intelEl, state.semantic_plan);
+    ReconIntel.logPlanUpdate(null, state.semantic_plan);
     updateStatusBar(state);
     updateStalenessDom();
   }
 
-  const vlmPlanEl = document.getElementById("vlm-plan");
-  const vlmPlanActionEl = document.getElementById("vlm-plan-action");
-  const vlmPlanRationaleEl = document.getElementById("vlm-plan-rationale");
-
-  function renderSemanticPlan(plan) {
-    if (!vlmPlanEl) return;
-    if (!plan || !plan.next_action) {
-      vlmPlanEl.hidden = true;
-      return;
-    }
-    vlmPlanEl.hidden = false;
-    vlmPlanActionEl.textContent = plan.next_action;
-    vlmPlanRationaleEl.textContent = plan.rationale || "";
+  function renderSemanticPlan(_plan) {
+    // Semantic plan updates are now shown in the footer intel ticker
+    // via ReconIntel.logPlanUpdate().
   }
 
   function updateStatusBar(s) {

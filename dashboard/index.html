@@ -53,21 +53,6 @@
           </div>
         </div>
 
-        <div class="panel panel-intel">
-          <div class="panel-header">
-            <span class="panel-title">Intel</span>
-            <span class="panel-meta" id="intel-meta">—</span>
-          </div>
-          <div id="vlm-plan" class="vlm-plan" hidden>
-            <div class="vlm-plan-action">
-              <span class="vlm-plan-label">Next</span>
-              <span id="vlm-plan-action">—</span>
-            </div>
-            <div class="vlm-plan-rationale" id="vlm-plan-rationale"></div>
-          </div>
-          <div id="intel-feed" class="intel-list"></div>
-        </div>
-
         <div class="panel panel-telemetry">
           <div class="panel-header">
             <span class="panel-title">Sensors</span>
@@ -126,7 +111,9 @@
         <span class="footer-label">Battery</span>
         <span id="battery-level" class="footer-value">--%</span>
       </div>
-      <div class="footer-spacer"></div>
+      <div class="footer-intel" id="footer-intel">
+        <span id="intel-ticker" class="intel-ticker">Awaiting intel…</span>
+      </div>
       <div class="footer-group footer-autonomy">
         <span class="footer-label">Autonomy</span>
         <button

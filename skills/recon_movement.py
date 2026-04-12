@@ -104,7 +104,11 @@ class ReconMovementSkill(Skill):
         try:
             super().__init__(*args, **kwargs)
         except TypeError:
-            super().__init__()
+            try:
+                import logging
+                super().__init__(logger=logging.getLogger("recon_movement"))
+            except TypeError:
+                pass
         self._analyzer = analyzer
         self._planner = planner or Planner()
         self._sleep = sleeper
