@@ -37,7 +37,7 @@
   if (!nocamera && !mjpegMain && mapStreamPort8080) {
     const camPort = (params.get("camera_port") || "8090").trim() || "8090";
     const camTopic = (
-      params.get("camera_topic") || "/mars/main_camera/left/image_raw"
+      params.get("camera_topic") || "/mars/main_camera/left/image_annotated"
     ).trim();
     const camProto = location.protocol === "https:" ? "https:" : "http:";
     mjpegMain = `${camProto}//${location.hostname}:${camPort}/stream?topic=${camTopic}`;
@@ -94,6 +94,15 @@
     log: document.getElementById("defusal-log"),
   };
 
+  const commandsEls = {
+    form: document.getElementById("commands-form"),
+    input: document.getElementById("commands-input"),
+    send: document.getElementById("commands-send"),
+    stop: document.getElementById("commands-stop"),
+    meta: document.getElementById("commands-meta"),
+    log: document.getElementById("commands-log"),
+  };
+
   ReconMap.initMap(canvas);
 
   function ageLabel(ts) {
@@ -140,6 +149,15 @@
   }
 
   function applyUpstreamMessage(msg) {
+    // Command-executor status frames are out-of-band — they don't flow
+    // through the main state merge (no robot/map/rooms), they just feed
+    // the Commands panel log.
+    if (msg && msg.type === "status") {
+      if (window.ReconActions && window.ReconActions.applyStatus) {
+        window.ReconActions.applyStatus(msg);
+      }
+      return;
+    }
     touchStalenessFromMessage(msg);
     const next = ReconAdapter.mergeState(state, msg);
     Object.assign(state, next);
@@ -152,6 +170,7 @@
     ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     renderSemanticPlan(state.semantic_plan);
+    ReconIntel.logPlanUpdate(intelEl, state.semantic_plan);
     updateStatusBar(state);
     updateStalenessDom();
   }
@@ -274,21 +293,57 @@
       }, 1000);
     };
 
-    open();
-    return () => {
+    const stop = () => {
       if (retryTimer) clearTimeout(retryTimer);
       if (ws && ws.readyState <= 1) ws.close();
     };
+
+    // send() returns true iff the frame was actually written to an open
+    // socket. Callers use that to show an immediate error in the UI
+    // instead of silently dropping commands.
+    const send = (obj) => {
+      if (!ws || ws.readyState !== 1) return false;
+      try {
+        ws.send(JSON.stringify(obj));
+        return true;
+      } catch (e) {
+        console.warn("ws send error", e);
+        return false;
+      }
+    };
+
+    open();
+    return { stop, send };
   }
 
   function wireMjpeg(img, url, onFrame) {
+    // Retry on error instead of giving up. On a cold start the YOLO node
+    // takes ~4s to warm up, during which web_video_server has nothing to
+    // stream and closes the connection; without a retry the <img> tag is
+    // permanently dead until the user reloads the page.
     if (!img || !url) return;
     img.decoding = "async";
-    img.onload = () => onFrame();
-    img.onerror = () => {
-      img.removeAttribute("src");
+    let retryDelay = 1000;
+    const MAX_RETRY = 8000;
+    let retryTimer = null;
+    const connect = () => {
+      // Cache-bust so the browser doesn't serve us a stale 404 response.
+      const sep = url.includes("?") ? "&" : "?";
+      img.src = `${url}${sep}_cb=${Date.now()}`;
     };
-    img.src = url;
+    img.onload = () => {
+      retryDelay = 1000; // reset backoff on successful frame
+      onFrame();
+    };
+    img.onerror = () => {
+      if (retryTimer) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        retryDelay = Math.min(retryDelay * 2, MAX_RETRY);
+        connect();
+      }, retryDelay);
+    };
+    connect();
   }
 
   if (mjpegMain && cameraImg) {
@@ -317,19 +372,28 @@
   }
 
   let feed = null;
-  let stopWs = null;
+  let wsHandle = null; // {stop, send} from connectWebSocket, or null in mock mode
 
   // feed=same → ws://this-host/ws (map_stream_node serves HTML + /ws on one port).
   // feed=ws&ws=… → explicit bridge URL (e.g. laptop http.server → robot).
   // feed=mock or default on :8766 etc. → ReconMock.
   if (liveWs) {
-    stopWs = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
+    wsHandle = connectWebSocket(wsConnectUrl, applyUpstreamMessage);
     connectionChip.textContent = "Connecting";
     connectionChip.className = "chip chip-amber";
   } else {
     feed = ReconMock.createMockFeed(applyUpstreamMessage);
     connectionChip.textContent = "Mock";
     connectionChip.className = "chip chip-amber";
+  }
+
+  // Wire the Commands panel. In mock mode we still init the panel (so the
+  // UI is consistent) but send() rejects because there's no live socket.
+  if (window.ReconActions) {
+    const sendFn = wsHandle
+      ? (obj) => wsHandle.send(obj)
+      : null;
+    window.ReconActions.init(commandsEls, sendFn);
   }
 
   window.ReconDashboard = {
@@ -344,13 +408,16 @@
     }),
     stop: () => {
       if (feed && feed.stop) feed.stop();
-      if (stopWs) stopWs();
+      if (wsHandle) wsHandle.stop();
     },
   };
 
   window.connectWebSocket = (url, onState) => {
-    if (stopWs) stopWs();
-    stopWs = connectWebSocket(url, onState || applyUpstreamMessage);
+    if (wsHandle) wsHandle.stop();
+    wsHandle = connectWebSocket(url, onState || applyUpstreamMessage);
+    if (window.ReconActions && window.ReconActions.setSender) {
+      window.ReconActions.setSender((obj) => wsHandle.send(obj));
+    }
   };
 
   console.log(

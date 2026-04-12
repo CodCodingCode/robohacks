@@ -4,7 +4,7 @@
  * Layers (drawn in order, bottom to top):
  *   1. SLAM (occupancy grid OR raw lidar-scan fallback)
  *   2. Radar blips
- *   3. VLM room labels & threat markers
+ *   3. Depth-projected semantic markers and VLM room labels
  *   4. Robot triangle
  *
  * World → screen: world is metres with +y pointing up.
@@ -18,15 +18,9 @@
   let dpr = 1;
   let cssW = 0;
   let cssH = 0;
-  // Block all rendering (no pan, no robot, no grid) until the first
-  // OccupancyGrid lands. Otherwise the viewport visibly pans from the
-  // default center toward the robot, then snaps to the map-fit when /map
-  // arrives a beat later — which reads as an annoying zoom/scroll animation.
-  let mapReady = false;
 
   const viewport = {
-    scaleX: 40, // pixels per metre, x axis
-    scaleY: 40, // pixels per metre, y axis
+    scale: 40, // pixels per metre
     centerWX: 5, // world-x at screen center
     centerWY: 5, // world-y at screen center
   };
@@ -49,45 +43,23 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Recompute scale to fit ~12m across the shorter axis.
     const minDim = Math.min(cssW, cssH);
-    viewport.scaleX = minDim / 12;
-    viewport.scaleY = minDim / 12;
+    viewport.scale = minDim / 12;
   }
 
   function toScreenX(wx) {
-    return cssW / 2 + (wx - viewport.centerWX) * viewport.scaleX;
+    return cssW / 2 + (wx - viewport.centerWX) * viewport.scale;
   }
   function toScreenY(wy) {
     // Flip Y so +y world is up on screen.
-    return cssH / 2 - (wy - viewport.centerWY) * viewport.scaleY;
+    return cssH / 2 - (wy - viewport.centerWY) * viewport.scale;
   }
 
   function renderMap(state) {
     if (!ctx) return;
-    const mapData = state.slam && state.slam.map;
-
-    // Gate: until we've seen the first OccupancyGrid, just render a
-    // static loading screen and bail — no pan, no robot, no grid.
-    if (!mapReady) {
-      if (!(mapData && mapData.width && mapData.height)) {
-        drawLoadingScreen();
-        return;
-      }
-      mapReady = true;
-    }
-
-    if (mapData && mapData.width && mapData.height) {
-      // Fit the full occupancy grid into the canvas, centered on the map.
-      const res = mapData.resolution || 0.05;
-      const ox = mapData.origin ? mapData.origin.x : 0;
-      const oy = mapData.origin ? mapData.origin.y : 0;
-      const mapW = mapData.width * res;
-      const mapH = mapData.height * res;
-      viewport.centerWX = ox + mapW / 2;
-      viewport.centerWY = oy + mapH / 2;
-      if (cssW > 0 && cssH > 0) {
-        viewport.scaleX = cssW / mapW;
-        viewport.scaleY = cssH / mapH;
-      }
+    if (state.robot) {
+      // Smoothly follow the robot.
+      viewport.centerWX += (state.robot.x - viewport.centerWX) * 0.08;
+      viewport.centerWY += (state.robot.y - viewport.centerWY) * 0.08;
     }
 
     ctx.clearRect(0, 0, cssW, cssH);
@@ -106,6 +78,7 @@
     }
 
     drawRoomLabels(state.rooms || []);
+    drawSemanticMarkers(state.semantic_markers || []);
     drawRadarBlips(
       state.radar_targets_display || state.radar_targets || [],
     );
@@ -116,42 +89,28 @@
     }
   }
 
-  function drawLoadingScreen() {
-    ctx.clearRect(0, 0, cssW, cssH);
-    ctx.save();
-    ctx.fillStyle = "#fafafa";
-    ctx.fillRect(0, 0, cssW, cssH);
-    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-    ctx.font = "500 16px Roboto, system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("Loading SLAM map…", cssW / 2, cssH / 2);
-    ctx.restore();
-  }
-
   /* --------------- Background grid --------------- */
 
   function drawGrid() {
     const step = 1; // 1 metre grid
-    const stepPxX = step * viewport.scaleX;
-    const stepPxY = step * viewport.scaleY;
-    if (stepPxX < 6 || stepPxY < 6) return;
+    const stepPx = step * viewport.scale;
+    if (stepPx < 6) return;
 
     ctx.save();
     ctx.strokeStyle = "rgba(98, 0, 238, 0.06)";
     ctx.lineWidth = 1;
     ctx.beginPath();
 
-    const startWX = Math.floor(viewport.centerWX - cssW / (2 * viewport.scaleX));
-    const endWX = Math.ceil(viewport.centerWX + cssW / (2 * viewport.scaleX));
+    const startWX = Math.floor(viewport.centerWX - cssW / (2 * viewport.scale));
+    const endWX = Math.ceil(viewport.centerWX + cssW / (2 * viewport.scale));
     for (let wx = startWX; wx <= endWX; wx++) {
       const sx = toScreenX(wx);
       ctx.moveTo(sx + 0.5, 0);
       ctx.lineTo(sx + 0.5, cssH);
     }
 
-    const startWY = Math.floor(viewport.centerWY - cssH / (2 * viewport.scaleY));
-    const endWY = Math.ceil(viewport.centerWY + cssH / (2 * viewport.scaleY));
+    const startWY = Math.floor(viewport.centerWY - cssH / (2 * viewport.scale));
+    const endWY = Math.ceil(viewport.centerWY + cssH / (2 * viewport.scale));
     for (let wy = startWY; wy <= endWY; wy++) {
       const sy = toScreenY(wy);
       ctx.moveTo(0, sy + 0.5);
@@ -168,14 +127,13 @@
     const res = mapData.resolution || 0.1;
     const ox = mapData.origin ? mapData.origin.x : 0;
     const oy = mapData.origin ? mapData.origin.y : 0;
-    const cellPxX = res * viewport.scaleX;
-    const cellPxY = res * viewport.scaleY;
+    const cellPx = res * viewport.scale;
 
     // Coarse culling: only draw cells whose world rect intersects viewport.
-    const viewMinWX = viewport.centerWX - cssW / (2 * viewport.scaleX);
-    const viewMaxWX = viewport.centerWX + cssW / (2 * viewport.scaleX);
-    const viewMinWY = viewport.centerWY - cssH / (2 * viewport.scaleY);
-    const viewMaxWY = viewport.centerWY + cssH / (2 * viewport.scaleY);
+    const viewMinWX = viewport.centerWX - cssW / (2 * viewport.scale);
+    const viewMaxWX = viewport.centerWX + cssW / (2 * viewport.scale);
+    const viewMinWY = viewport.centerWY - cssH / (2 * viewport.scale);
+    const viewMaxWY = viewport.centerWY + cssH / (2 * viewport.scale);
 
     const minCellX = Math.max(0, Math.floor((viewMinWX - ox) / res));
     const maxCellX = Math.min(
@@ -201,7 +159,7 @@
         const wy = oy + cy * res;
         const sx = toScreenX(wx);
         const sy = toScreenY(wy + res); // top-left on screen (flipped Y)
-        ctx.fillRect(sx, sy, Math.ceil(cellPxX) + 1, Math.ceil(cellPxY) + 1);
+        ctx.fillRect(sx, sy, Math.ceil(cellPx) + 1, Math.ceil(cellPx) + 1);
       }
     }
   }
@@ -264,6 +222,36 @@
   }
 
   /* --------------- VLM room labels --------------- */
+
+  function drawSemanticMarkers(markers) {
+    for (const marker of markers) {
+      const sx = toScreenX(marker.x);
+      const sy = toScreenY(marker.y);
+      const isThreat = marker.category === "threat";
+
+      ctx.save();
+      ctx.fillStyle = isThreat ? "#b00020" : "#018786";
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(0,0,0,0.78)";
+      ctx.fillRect(sx + 9, sy - 15, 112, 28);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "500 11px Roboto, system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(String(marker.label || "object").slice(0, 16), sx + 14, sy - 3);
+      if (marker.depth_m != null && isFinite(marker.depth_m)) {
+        ctx.font = "400 10px Roboto, system-ui, sans-serif";
+        ctx.fillText(`${Number(marker.depth_m).toFixed(1)}m`, sx + 14, sy + 10);
+      }
+      ctx.restore();
+    }
+    ctx.textAlign = "left";
+  }
 
   function drawRoomLabels(rooms) {
     for (const room of rooms) {

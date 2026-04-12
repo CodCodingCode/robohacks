@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Standalone SLAM → dashboard WebSocket bridge.
+"""Standalone SLAM → dashboard WebSocket bridge with intruder alerts.
 
 Runs as a plain ROS2 Python node (NOT a brain_client Skill). Subscribes
 directly to /odom and /map and streams JSON frames over a WebSocket.
+
+Intruder alert: when ELEVENLABS_API_KEY is set alongside GEMINI_API_KEY,
+the VLM thread automatically detects people in camera frames and plays
+a spoken warning through the robot speakers via the ElevenLabs TTS API.
 
 Why standalone instead of the MapStreamSkill approach: the brain_client
 skills_action_server runs on a single-threaded rclpy executor, so during
@@ -12,6 +16,8 @@ executor doesn't have that problem.
 
 Usage (on the Jetson, after sourcing ROS + workspace):
 
+    export GEMINI_API_KEY=your-gemini-key
+    export ELEVENLABS_API_KEY=your-elevenlabs-key   # enables intruder alerts
     python3 slam/map_stream_node.py --host 0.0.0.0 --port 8080
 
 Then open http://<robot-ip>:8080/ — static dashboard + WebSocket JSON on /ws.
@@ -53,20 +59,6 @@ SCAN_HZ = 0.5
 # VLM analysis cadence — Gemini rate limit is 2s minimum.
 VLM_INTERVAL = 3.0
 
-# Radar wallhacks: UDP ingest from ESP32 (or the mock sender in
-# slam/mock_radar_sender.py). Producers send JSON of the form
-#   {"sensor_id": 1, "ts": <float>,
-#    "targets": [{"x_mm": int, "y_mm": int, "v_cms": int}, ...]}
-# Units match the HLK-LD2450 native output (mm, cm/s).
-RADAR_UDP_PORT = 8766
-RADAR_STALE_SECONDS = 1.0
-
-# (dx_m, dy_m, dtheta_rad) — sensor pose relative to robot base_link.
-# Sensor 1 = front center. Measure real offsets on the physical rig.
-SENSOR_MOUNTS: dict[int, tuple[float, float, float]] = {
-    1: (0.20, 0.00, 0.0),
-}
-
 
 def _yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
     return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
@@ -84,10 +76,6 @@ class MapStreamNode(Node):
         self._last_map: OccupancyGrid | None = None
         self._last_scan: LaserScan | None = None
         self._battery_pct: float | None = None
-        # sensor_id -> (ingest_timestamp, list[target-dict-in-map-frame]).
-        # Populated from UDP by RadarProtocol in serve(); consumed by
-        # broadcaster() via radar_snapshot(). All accesses under _lock.
-        self._latest_radar: dict[int, tuple[float, list[dict]]] = {}
         # Latest compressed camera frame (bytes) for VLM analysis.
         self._last_image_bytes: bytes | None = None
         # Latest VLM result — merged into every broadcaster payload.
@@ -160,40 +148,6 @@ class MapStreamNode(Node):
     def _scan_cb(self, msg: LaserScan) -> None:
         with self._lock:
             self._last_scan = msg
-
-    def _store_radar(self, sensor_id: int, targets: list[dict]) -> None:
-        with self._lock:
-            self._latest_radar[sensor_id] = (time.time(), targets)
-
-    @staticmethod
-    def _radar_to_map(
-        x_sensor_m: float,
-        y_sensor_m: float,
-        sensor_offset: tuple[float, float, float],
-        pose: tuple[float, float, float],
-    ) -> tuple[float, float]:
-        """Transform a radar-local (x, y) point into the map frame.
-
-        sensor_offset is the sensor's (dx, dy, dtheta) pose on base_link;
-        pose is the robot's current (x, y, theta) in the map frame.
-        """
-        sdx, sdy, sdt = sensor_offset
-        x_base = sdx + x_sensor_m * math.cos(sdt) - y_sensor_m * math.sin(sdt)
-        y_base = sdy + x_sensor_m * math.sin(sdt) + y_sensor_m * math.cos(sdt)
-        rx, ry, rt = pose
-        x_map = rx + x_base * math.cos(rt) - y_base * math.sin(rt)
-        y_map = ry + x_base * math.sin(rt) + y_base * math.cos(rt)
-        return x_map, y_map
-
-    def radar_snapshot(self) -> list[dict]:
-        """Flat list of all non-stale radar targets in map frame."""
-        now = time.time()
-        out: list[dict] = []
-        with self._lock:
-            for _sid, (ts, targets) in self._latest_radar.items():
-                if now - ts <= RADAR_STALE_SECONDS:
-                    out.extend(targets)
-        return out
 
     def _image_cb(self, msg: Image) -> None:
         try:
@@ -297,11 +251,80 @@ def _serve_static(request_path: str):
     return 200, ctype or "application/octet-stream", target.read_bytes()
 
 
+def _init_intruder_alert():
+    """Try to set up ElevenLabs TTS + person detection for intruder alerts.
+
+    Returns (PersonDetector, ElevenLabsTTS) or (None, None) if deps are
+    missing or ELEVENLABS_API_KEY is not set.
+    """
+    import os
+    try:
+        from intruder_alert.person_detector import PersonDetector
+        from intruder_alert.elevenlabs_tts import ElevenLabsTTS
+    except ImportError:
+        print("[ALERT] intruder_alert module not found — alerts disabled.")
+        return None, None
+
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        print("[ALERT] ELEVENLABS_API_KEY not set — intruder alerts disabled.")
+        return None, None
+
+    detector = PersonDetector(cooldown_seconds=15.0)
+    tts = ElevenLabsTTS()
+
+    # Pre-cache the default warning so the first alert plays instantly.
+    try:
+        tts.synthesize(
+            "Attention. This is an emergency. A potential explosive device "
+            "has been detected in this area. For your safety, evacuate the "
+            "building immediately. Move away from the area calmly and quickly. "
+            "Do not touch any suspicious objects. Emergency services have been "
+            "contacted. Please proceed to the nearest exit now."
+        )
+        print("[ALERT] Evacuation alert system armed — audio pre-cached.")
+    except Exception as exc:
+        print(f"[ALERT] Failed to pre-cache audio: {exc}")
+
+    return detector, tts
+
+
+def _handle_intruder_alert(
+    vlm_result: dict,
+    detector,
+    tts,
+) -> None:
+    """Check VLM result for people and play an audio warning if found."""
+    people = detector.extract_people(vlm_result)
+    if not people:
+        return
+
+    if not detector.should_alert():
+        return
+
+    closest = max(people, key=lambda p: p.bbox_area)
+    print(
+        f"[ALERT] Person detected: {closest.label} "
+        f"(size={closest.size_proxy:.3f}) — issuing evacuation warning"
+    )
+    detector.mark_alerted()
+
+    tts.speak_async(
+        "Attention. This is an emergency. A potential explosive device "
+        "has been detected in this area. For your safety, evacuate the "
+        "building immediately. Move away from the area calmly and quickly. "
+        "Do not touch any suspicious objects. Emergency services have been "
+        "contacted. Please proceed to the nearest exit now."
+    )
+
+
 def run_vlm_thread(node: MapStreamNode) -> None:
     """Background thread: grab camera frames and call Gemini every VLM_INTERVAL seconds.
 
     Results are stored on the node and merged into the next broadcaster payload.
     Requires GEMINI_API_KEY to be set in the environment.
+
+    When ELEVENLABS_API_KEY is also set, automatically plays an audio
+    warning through the robot speakers whenever a person is detected.
     """
     import os
     if not os.environ.get("GEMINI_API_KEY"):
@@ -315,6 +338,7 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         return
 
     session = VLMSession()
+    detector, tts = _init_intruder_alert()
     print("[VLM] VLM thread started.")
 
     while True:
@@ -325,6 +349,9 @@ def run_vlm_thread(node: MapStreamNode) -> None:
         try:
             result = session.update(image_b64)
             node.set_vlm_result(result)
+
+            if detector and tts:
+                _handle_intruder_alert(result, detector, tts)
         except Exception as exc:
             print(f"[VLM] analysis error: {exc}")
 
@@ -396,10 +423,6 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                 payload["slam"] = build_scan_payload(scan)
                 last_scan_push = now
 
-            fresh = node.radar_snapshot()
-            if fresh:
-                payload["radar_targets"] = fresh
-
             # Merge latest VLM result (rooms, annotations, semantic_plan, etc.)
             vlm = node.get_vlm_result()
             if vlm:
@@ -417,52 +440,6 @@ async def serve(node: MapStreamNode, host: str, port: int) -> None:
                     clients.discard(c)
 
             await asyncio.sleep(pose_interval)
-
-    class RadarProtocol(asyncio.DatagramProtocol):
-        """Receive radar detections as JSON datagrams and stash them on the node.
-
-        Expected packet schema (one per producer per tick, ~10 Hz):
-            {"sensor_id": 1, "ts": 1234567890.0,
-             "targets": [{"x_mm": 1200, "y_mm": 3400, "v_cms": 20}, ...]}
-        """
-
-        def datagram_received(self, data: bytes, addr) -> None:
-            try:
-                msg = json.loads(data.decode())
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return
-            sensor_id = int(msg.get("sensor_id", 0))
-            offset = SENSOR_MOUNTS.get(sensor_id)
-            if offset is None:
-                return
-            with node._lock:
-                pose = node._pose
-            if pose is None:
-                return  # can't transform without a robot pose — drop
-            out: list[dict] = []
-            for i, t in enumerate(msg.get("targets", [])):
-                xm = t.get("x_mm", 0) / 1000.0
-                ym = t.get("y_mm", 0) / 1000.0
-                if xm == 0 and ym == 0:
-                    continue  # LD2450 "no target" sentinel
-                mx, my = node._radar_to_map(xm, ym, offset, pose)
-                out.append({
-                    "id": sensor_id * 10 + i,
-                    "x": mx,
-                    "y": my,
-                    "speed": t.get("v_cms", 0) / 100.0,
-                    "confidence": 0.7,
-                    "confirmed_by_vlm": False,
-                })
-            node._store_radar(sensor_id, out)
-
-    loop = asyncio.get_running_loop()
-    await loop.create_datagram_endpoint(
-        RadarProtocol, local_addr=(host, RADAR_UDP_PORT)
-    )
-    node.get_logger().info(
-        f"radar UDP listener on {host}:{RADAR_UDP_PORT}"
-    )
 
     async with websockets.serve(handler, host, port, process_request=process_request):
         node.get_logger().info(

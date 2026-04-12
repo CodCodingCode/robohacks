@@ -16,8 +16,10 @@ if ! command -v ros2 >/dev/null 2>&1; then
 fi
 
 VIDEO_PID=""
+YOLO_PID=""
 cleanup() {
   [[ -n "${VIDEO_PID}" ]] && kill "$VIDEO_PID" 2>/dev/null || true
+  [[ -n "${YOLO_PID}" ]] && kill "$YOLO_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -28,6 +30,13 @@ if [[ "${SKIP_VIDEO:-0}" != "1" ]] && ros2 pkg prefix web_video_server >/dev/nul
   sleep 2
 elif [[ "${SKIP_VIDEO:-0}" != "1" ]]; then
   echo "Optional: sudo apt install ros-humble-web-video-server (camera panel stays empty until then)."
+fi
+
+if [[ "${SKIP_YOLO:-0}" != "1" ]]; then
+  echo "Starting YOLO CV node (model=${YOLO_MODEL:-yolo12n.pt}, skip=${YOLO_SKIP:-2})…"
+  python3 slam/yolo_cv_node.py &
+  YOLO_PID=$!
+  sleep 1
 fi
 
 echo "Open: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<robot-ip>"):${MAP_PORT}/"

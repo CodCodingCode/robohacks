@@ -185,9 +185,9 @@ body {
   letter-spacing: 0;
 }
 
-/* ---------- Map panel ---------- */
+/* ---------- Camera panel (left, full-height) ---------- */
 
-.panel-map {
+.panel-camera {
   grid-row: 1 / -1;
 }
 
@@ -259,7 +259,8 @@ body {
   grid-template-rows:
     minmax(160px, 1fr)
     minmax(120px, 0.9fr)
-    minmax(72px, 0.42fr);
+    minmax(72px, 0.42fr)
+    minmax(180px, 0.9fr);
   gap: 16px;
   min-height: 0;
 }
@@ -860,4 +861,130 @@ body.defusal-active {
   opacity: 0.38;
   cursor: not-allowed;
   pointer-events: none;
+}
+
+/* ---------- Commands panel ---------- */
+
+.panel-commands {
+  min-height: 0;
+}
+
+.commands-log {
+  flex: 0 1 auto;
+  max-height: 45%;
+  overflow-y: auto;
+  margin: 0;
+  padding: 10px 12px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.commands-log:empty {
+  display: none;
+}
+
+.commands-log::-webkit-scrollbar {
+  width: 6px;
+}
+
+.commands-log::-webkit-scrollbar-thumb {
+  background: var(--divider-strong);
+  border-radius: 3px;
+}
+
+.commands-log li {
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: var(--md-surface);
+  border: 1px solid var(--divider);
+  border-left: 3px solid var(--divider-strong);
+  color: var(--md-on-surface);
+  word-break: break-word;
+}
+
+.commands-log li .cmd-ts {
+  display: inline-block;
+  margin-right: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: var(--hint);
+  letter-spacing: 0.02em;
+}
+
+.commands-log li.cmd-user {
+  border-left-color: var(--md-primary);
+}
+
+.commands-log li.cmd-bot {
+  border-left-color: var(--md-secondary-variant);
+  color: var(--secondary-text);
+}
+
+.commands-log li.cmd-error {
+  border-left-color: var(--md-error);
+  color: var(--md-error);
+}
+
+.commands-log li.cmd-system {
+  border-left-color: var(--divider-strong);
+  color: var(--hint);
+  font-style: italic;
+}
+
+.commands-log li.cmd-empty {
+  color: var(--hint);
+  text-align: center;
+  border-left-color: transparent;
+  background: transparent;
+  font-style: italic;
+}
+
+.commands-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.commands-input {
+  width: 100%;
+  resize: none;
+  flex: 1 1 auto;
+  min-height: 60px;
+  padding: 8px 10px;
+  border: 1px solid var(--divider-strong);
+  border-radius: var(--radius);
+  background: var(--md-surface);
+  color: var(--md-on-surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.commands-input:focus {
+  border-color: var(--md-primary);
+  box-shadow: 0 0 0 2px rgba(98, 0, 238, 0.15);
+}
+
+.commands-input::placeholder {
+  color: var(--hint);
+}
+
+.commands-row {
+  display: flex;
+  gap: 8px;
+}
+
+.commands-row .btn {
+  flex: 1;
 }
