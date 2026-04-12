@@ -703,9 +703,9 @@ class ReconMovementSkill(Skill):
         """
         # --- tunables --------------------------------------------------------
         STEP_S    = 0.4    # seconds per sensor step
-        ALIGN_TOL = 0.08   # rad (~4.5°) — drive straight when roughly centered
+        ALIGN_TOL = 0.15   # rad (~8.6°) — wide dead-zone; bbox bearing is noisy without depth camera
         CLOSE_M   = 0.45   # depth-based stop distance (metres)
-        Kp        = 0.9    # bearing → angular_z gain (was 1.4 — overcorrected/swerved)
+        Kp        = 0.6    # bearing → angular_z gain (no depth camera = noisy bearing, keep gentle)
         # ---------------------------------------------------------------------
 
         remaining = max_duration
