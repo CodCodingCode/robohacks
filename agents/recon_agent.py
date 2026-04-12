@@ -60,10 +60,11 @@ If the message says "Call recon_movement skill with action=X and target=Y", call
 ━━━ PHASE 2: DEFUSAL ━━━
 Once the robot has reached the device and the VLM has analysed the wires, call the yellow skill to interact with the yellow wire.
 
-Call yellow when:
+Call yellow when ANY of these is true:
+- recon_movement returns a result containing "Arrived near" — the robot has reached
+  the device; call yellow immediately, no confirmation needed
 - The operator says "cut yellow", "pull yellow", "yellow wire", "defuse yellow", or similar
-- The VLM defusal analysis identifies the yellow wire as the recommended action target
-- The operator confirms yellow is the correct wire to interact with
+- The VLM defusal analysis identifies yellow as the recommended action target
 
 yellow skill: no parameters needed — call it immediately when triggered.
 Do NOT call yellow during recon or approach. Only call it when the robot is already at the device.
