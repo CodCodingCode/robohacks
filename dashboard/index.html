@@ -106,12 +106,12 @@
 
       <!-- BOTTOM ROW: Controls -->
       <section class="bottom-row">
-        <div class="panel panel-telemetry">
+        <div class="panel panel-logs">
           <div class="panel-header">
-            <span class="section-label">SENSORS</span>
-            <span class="panel-meta" id="telemetry-meta">—</span>
+            <span class="section-label">LOGS</span>
+            <span class="panel-meta" id="commands-meta">—</span>
           </div>
-          <div id="telemetry-feed" class="telemetry-feed"></div>
+          <ul id="commands-log" class="commands-log"></ul>
         </div>
 
         <div class="panel panel-radar">
@@ -128,21 +128,25 @@
         <div class="panel panel-commands">
           <div class="panel-header">
             <span class="section-label">COMMAND</span>
-            <span class="panel-meta" id="commands-meta">—</span>
           </div>
-          <ul id="commands-log" class="commands-log"></ul>
           <form id="commands-form" class="commands-form" autocomplete="off">
-            <textarea
-              id="commands-input"
-              class="commands-input"
-              rows="2"
-            ></textarea>
-            <button type="submit" id="commands-send" class="btn-pill btn-send">
-              SEND
-            </button>
-            <button type="button" id="commands-stop" class="btn-pill btn-stop">
-              STOP
-            </button>
+            <div class="input-wrap">
+              <span class="input-caret">›</span>
+              <textarea
+                id="commands-input"
+                class="commands-input"
+                rows="2"
+                placeholder="Tell the robot what to do..."
+              ></textarea>
+            </div>
+            <div class="commands-row">
+              <button type="submit" id="commands-send" class="btn-pill btn-send">
+                SEND
+              </button>
+              <button type="button" id="commands-stop" class="btn-pill btn-stop">
+                STOP
+              </button>
+            </div>
           </form>
         </div>
       </section>

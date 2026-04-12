@@ -88,8 +88,8 @@
     const w = scopeCanvas.width;
     const h = scopeCanvas.height;
     const cx = w / 2;
-    const cy = h - 10 * dpr;
-    const scale = (h - 20 * dpr) / SCOPE_RANGE_M;
+    const cy = h;
+    const scale = h / SCOPE_RANGE_M;
     const now = Date.now();
 
     const sweepPhase = (now % SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS;
@@ -97,7 +97,7 @@
 
     scopeCtx.clearRect(0, 0, w, h);
 
-    scopeCtx.fillStyle = "#0A0A0A";
+    scopeCtx.fillStyle = "#111111";
     scopeCtx.fillRect(0, 0, w, h);
 
     // Range rings

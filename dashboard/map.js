@@ -124,7 +124,7 @@
     ctx.clearRect(0, 0, cssW, cssH);
 
     // Dark base fill
-    ctx.fillStyle = "#0A0A0A";
+    ctx.fillStyle = "#111111";
     ctx.fillRect(0, 0, cssW, cssH);
 
     drawDotGrid();
