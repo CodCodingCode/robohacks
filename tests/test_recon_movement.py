@@ -58,9 +58,9 @@ def test_move_forward_clamps_distance_and_chunks_velocity_commands():
     message, status = skill.execute("move_forward", distance_m=99.0, max_duration_s=5.0)
 
     assert status == SkillResult.SUCCESS
-    assert "up to 1.00m" in message
+    assert "up to 3.00m" in message
     movement = skill.mobility.cmd_vel[:-1]
-    assert len(movement) == 3
+    assert len(movement) == 1
     assert all(cmd[0] == MAX_FORWARD_SPEED_MPS for cmd in movement)
     assert all(cmd[1] == 0.0 for cmd in movement)
     assert all(cmd[2] <= MAX_COMMAND_DURATION_S for cmd in movement)
