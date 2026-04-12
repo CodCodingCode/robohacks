@@ -114,6 +114,17 @@
           <div id="telemetry-feed" class="telemetry-feed"></div>
         </div>
 
+        <div class="panel panel-radar">
+          <div class="panel-header">
+            <span class="section-label">RADAR</span>
+            <span class="panel-meta" id="radar-meta">--</span>
+          </div>
+          <div class="radar-inner">
+            <canvas id="radar-scope" width="200" height="140"></canvas>
+            <ul id="radar-log" class="radar-log"></ul>
+          </div>
+        </div>
+
         <div class="panel panel-commands">
           <div class="panel-header">
             <span class="section-label">COMMAND</span>
@@ -203,6 +214,7 @@
     <script src="map.js"></script>
     <script src="intel.js"></script>
     <script src="telemetry.js"></script>
+    <script src="radar.js"></script>
     <script src="defusal.js"></script>
     <script src="actions.js"></script>
     <script src="app.js"></script>
