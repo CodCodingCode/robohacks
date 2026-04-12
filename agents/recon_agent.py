@@ -39,7 +39,7 @@ RULES — follow these exactly:
 Action mapping — pick the matching action and call the skill now:
 - action="scan_room"                → scan, look around, survey, inspect area
 - action="move_forward"             → move forward, go forward, advance (pass distance_m if given)
-- action="approach_object"          → move to X, go to X, approach X, inspect X, find X, locate X, reach X, navigate to X, drive to X (pass target="X")
+- action="approach_object"          → move to X, go to X, approach X, inspect X, find X, locate X, reach X, navigate to X, drive to X (pass target="X", max_duration_s=90)
 - action="approach_detected_threat" → approach threat, approach device, go to bomb
 - action="hold"                     → stop, wait, hold, pause
 - action="reset_recon"              → reset, resume

@@ -230,24 +230,42 @@ class ReconMovementSkill(Skill):
             return "approach_object requires a target", SkillResult.FAILURE
 
         max_duration = min(
-            _clamp_duration(max_duration_s, default=20.0),
+            _clamp_duration(max_duration_s, default=60.0),
             MAX_APPROACH_DURATION_S,
         )
         remaining = max_duration
+
+        # Cache VLM result across movement steps — Gemini takes ~3s per call,
+        # so we reuse the last analysis for up to VLM_REUSE_STEPS movements
+        # before re-querying. Only force a fresh call after a rotation (bearing
+        # correction) since the scene has shifted.
+        VLM_REUSE_STEPS = 2
+        steps_since_vlm = VLM_REUSE_STEPS  # force call on first iteration
+        last_result: dict = {}
+        last_command_was_rotation = False
 
         while remaining > 0.0:
             if self._cancelled:
                 self._stop()
                 return f"Approach to {target} cancelled", SkillResult.CANCELLED
 
-            image_b64 = self.image
-            if not image_b64:
-                self._stop()
-                return f"No camera frame available to approach {target}", SkillResult.FAILURE
+            # Re-call VLM when: first step, after a rotation, or reuse limit reached.
+            needs_vlm = (
+                steps_since_vlm >= VLM_REUSE_STEPS
+                or last_command_was_rotation
+            )
+            if needs_vlm:
+                image_b64 = self.image
+                if not image_b64:
+                    self._stop()
+                    return f"No camera frame available to approach {target}", SkillResult.FAILURE
+                last_result = self._analyze_frame(image_b64)
+                steps_since_vlm = 0
+            else:
+                steps_since_vlm += 1
 
-            result = self._analyze_frame(image_b64)
             annotation = _find_target_annotation(
-                result.get("annotations", []),
+                last_result.get("annotations", []),
                 target,
             )
             if annotation is None:
@@ -257,8 +275,11 @@ class ReconMovementSkill(Skill):
                     duration=1.0,
                     reason=f"Searching for {target}",
                 )
+                last_command_was_rotation = True
+                steps_since_vlm = VLM_REUSE_STEPS  # force VLM after search spin
             else:
                 command = self._object_command(annotation, target)
+                last_command_was_rotation = (command.kind == "rotate")
 
             outcome, budget = self._run_planner_command(command)
             if outcome == SkillResult.SUCCESS:

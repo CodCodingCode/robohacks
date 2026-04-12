@@ -102,15 +102,15 @@ class Planner:
     """
 
     # Tunable thresholds — override per-robot via `planner.APPROACH_SPEED = 0.05`
-    BEARING_TOLERANCE: float = 0.08   # ~4.5 deg dead zone
-    CLOSE_ENOUGH: float = 0.12        # bbox fills ~12% of frame → stop (fallback)
-    CLOSE_ENOUGH_M: float = 1.0       # depth camera: stop when threat < 1 m away
+    BEARING_TOLERANCE: float = 0.10   # ~5.7 deg dead zone
+    CLOSE_ENOUGH: float = 0.25        # bbox fills ~25% of frame → stop (~1m away)
+    CLOSE_ENOUGH_M: float = 0.8       # depth camera: stop when object < 0.8m away
     RECON_STEP_RAD: float = math.pi / 4  # 45 deg scan steps
     RECON_STEPS_TOTAL: int = 8        # 8 steps = full 360
-    APPROACH_SPEED: float = 0.08      # m/s
-    APPROACH_DURATION: float = 1.5    # seconds per drive step
-    REACQUIRE_SPEED: float = 0.3      # rad/s spin when threat lost
-    ADVANCE_SPEED: float = 0.1        # m/s after full scan
+    APPROACH_SPEED: float = 0.15      # m/s
+    APPROACH_DURATION: float = 2.5    # seconds per drive step
+    REACQUIRE_SPEED: float = 0.4      # rad/s spin when object lost
+    ADVANCE_SPEED: float = 0.15       # m/s after full scan
     ADVANCE_DURATION: float = 2.0     # seconds forward after full scan
 
     def __init__(self):
