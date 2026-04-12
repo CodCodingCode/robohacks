@@ -222,6 +222,32 @@ def test_approach_object_searches_when_target_is_not_visible():
     assert skill.mobility.cmd_vel[-1] == (0.0, 0.0, 0.1)
 
 
+def test_approach_object_falls_back_to_threat_when_label_is_bomb():
+    """approach_object should drive toward a threat annotation when the label
+    ("bomb") doesn't match the user's description ("cardboard box"). This is
+    the real-world failure case: VLM classifies the shoebox as a threat and
+    labels it "bomb", but the operator referred to it as "cardboard box"."""
+    def analyzer(_image):
+        return {
+            "annotations": [
+                {"category": "threat", "label": "bomb", "bbox": [450, 450, 550, 550]},
+            ],
+        }
+
+    skill = make_skill(analyzer=analyzer)
+    skill.image = "fake-b64"
+
+    message, status = skill.execute(
+        "approach_object",
+        target="cardboard box",
+        max_duration_s=2.0,
+    )
+
+    movement = skill.mobility.cmd_vel[:-1]
+    assert movement, "Expected forward movement toward threat, got none"
+    assert all(cmd[0] > 0.0 for cmd in movement), "Expected positive linear_x"
+
+
 def test_approach_detected_threat_finishes_when_planner_reports_done():
     def analyzer(_image):
         return {

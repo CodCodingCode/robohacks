@@ -259,7 +259,7 @@ def _normalize_annotations(raw_annotations: list) -> list:
             continue
         bbox = [max(0, min(1000, int(v))) for v in bbox]
         category = a.get("category", "object")
-        label = "bomb" if category == "threat" else a.get("label", "unknown")
+        label = a.get("label", "unknown")
         ann = {
             "label": label,
             "bbox": bbox,

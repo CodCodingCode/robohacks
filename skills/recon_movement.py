@@ -509,12 +509,20 @@ class ReconMovementSkill(Skill):
             _clamp_duration(max_duration_s, default=60.0),
             MAX_APPROACH_DURATION_S,
         )
+        def _get_ann(result):
+            ann = _find_target_annotation(result.get("annotations", []), target)
+            if ann is None:
+                # Fallback: approach the visible threat. Common when the user
+                # refers to the threat device by appearance ("cardboard box")
+                # but the VLM labels it "bomb" — the threat annotation IS the
+                # target object.
+                ann = self._planner._find_priority_target(result)
+            return ann
+
         return self._approach_with_think_fast_slow(
             target=target,
             max_duration=max_duration,
-            get_annotation=lambda result: _find_target_annotation(
-                result.get("annotations", []), target
-            ),
+            get_annotation=_get_ann,
         )
 
     def _rotate_by(self, angle_rad: float):
