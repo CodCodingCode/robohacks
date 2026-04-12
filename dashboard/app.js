@@ -65,6 +65,8 @@
   const telemetryMetaEl = document.getElementById("telemetry-meta");
   const gripperFeedMetaEl = document.getElementById("gripper-feed-meta");
   const cameraImg = document.getElementById("camera-feed");
+  const approachCanvas = document.getElementById("approach-overlay");
+  const approachCtx = approachCanvas ? approachCanvas.getContext("2d") : null;
   const gripperImg = document.getElementById("gripper-feed");
   const missionBar = document.getElementById("mission-mode-bar");
   const autonomyToggle = document.getElementById("autonomy-toggle");
@@ -226,6 +228,102 @@
     renderAll();
   }
 
+  /* ---- Approach overlay ---- */
+  const ACTION_COLORS = {
+    driving:   "#00ff88",
+    aligning:  "#ffcc00",
+    searching: "#ff8800",
+    arrived:   "#00aaff",
+    obstacle:  "#ff2200",
+  };
+
+  function renderApproachOverlay(approach) {
+    if (!approachCtx || !approachCanvas) return;
+    // Sync canvas resolution to its CSS size.
+    approachCanvas.width  = approachCanvas.clientWidth;
+    approachCanvas.height = approachCanvas.clientHeight;
+    approachCtx.clearRect(0, 0, approachCanvas.width, approachCanvas.height);
+    if (!approach || !approach.bbox || approach.bbox.length !== 4) return;
+    // Expire stale state (older than 2 s).
+    if (approach.ts && (Date.now() / 1000 - approach.ts) > 2) return;
+
+    const W = approachCanvas.width, H = approachCanvas.height;
+    const [y0, x0, y1, x1] = approach.bbox;
+    const px0 = x0 / 1000 * W, py0 = y0 / 1000 * H;
+    const px1 = x1 / 1000 * W, py1 = y1 / 1000 * H;
+    const color = ACTION_COLORS[approach.action] || "#ffffff";
+
+    // Bbox rectangle.
+    approachCtx.strokeStyle = color;
+    approachCtx.lineWidth = 2;
+    approachCtx.strokeRect(px0, py0, px1 - px0, py1 - py0);
+
+    // Corner accents.
+    const cs = 10;
+    approachCtx.lineWidth = 3;
+    [[px0, py0, 1, 1], [px1, py0, -1, 1], [px0, py1, 1, -1], [px1, py1, -1, -1]].forEach(([cx, cy, dx, dy]) => {
+      approachCtx.beginPath();
+      approachCtx.moveTo(cx + dx * cs, cy);
+      approachCtx.lineTo(cx, cy);
+      approachCtx.lineTo(cx, cy + dy * cs);
+      approachCtx.stroke();
+    });
+
+    // Depth label above bbox.
+    approachCtx.font = "bold 13px monospace";
+    approachCtx.lineWidth = 3;
+    const depthTxt = approach.depth_m != null ? `${approach.depth_m.toFixed(2)} m` : "—";
+    approachCtx.strokeStyle = "#000";
+    approachCtx.strokeText(depthTxt, px0 + 4, py0 - 6);
+    approachCtx.fillStyle = color;
+    approachCtx.fillText(depthTxt, px0 + 4, py0 - 6);
+
+    // Bearing arrow from bbox centre (horizontal only).
+    const bcx = (px0 + px1) / 2, bcy = (py0 + py1) / 2;
+    const arrowLen = Math.min(40, (px1 - px0) * 0.4);
+    const br = approach.bearing_rad || 0;
+    approachCtx.strokeStyle = color;
+    approachCtx.lineWidth = 2;
+    approachCtx.beginPath();
+    approachCtx.moveTo(bcx, bcy);
+    approachCtx.lineTo(bcx + Math.sin(br) * arrowLen, bcy);
+    approachCtx.stroke();
+    // Arrowhead.
+    const ax = bcx + Math.sin(br) * arrowLen, ay = bcy;
+    const sign = br >= 0 ? 1 : -1;
+    approachCtx.beginPath();
+    approachCtx.moveTo(ax, ay);
+    approachCtx.lineTo(ax - sign * 7, ay - 5);
+    approachCtx.lineTo(ax - sign * 7, ay + 5);
+    approachCtx.closePath();
+    approachCtx.fillStyle = color;
+    approachCtx.fill();
+
+    // Action badge (top-left).
+    const label = (approach.action || "").toUpperCase();
+    approachCtx.font = "bold 11px monospace";
+    const tw = approachCtx.measureText(label).width;
+    approachCtx.fillStyle = "rgba(0,0,0,0.55)";
+    approachCtx.fillRect(4, 4, tw + 10, 20);
+    approachCtx.fillStyle = color;
+    approachCtx.fillText(label, 9, 18);
+
+    // LiDAR clearance bar (bottom-right).
+    if (approach.lidar_fwd_m != null) {
+      const maxD = 3.0, barW = Math.min(W * 0.28, 120), barH = 6;
+      const bx = W - barW - 6, by = H - 18;
+      const pct = Math.min(approach.lidar_fwd_m / maxD, 1);
+      const barColor = approach.lidar_fwd_m < 0.5 ? "#ff2200" : approach.lidar_fwd_m < 1.0 ? "#ffcc00" : "#00ff88";
+      approachCtx.fillStyle = "rgba(0,0,0,0.5)";
+      approachCtx.fillRect(bx, by, barW, barH);
+      approachCtx.fillStyle = barColor;
+      approachCtx.fillRect(bx, by, barW * pct, barH);
+      approachCtx.font = "10px monospace";
+      approachCtx.fillStyle = "#ccc";
+      approachCtx.fillText(`LiDAR ${approach.lidar_fwd_m.toFixed(2)}m`, bx, by - 3);
+    }
+  }
+
   function renderAll() {
     ReconIntel.renderIntel(state.rooms || [], null, state.radar_targets || []);
     ReconTelemetry.renderTelemetry(state.telemetry || [], telemetryEl);
@@ -233,6 +331,7 @@
     ReconDefusal.renderDefusal(state.defusal || {}, defusalEls);
     ReconDefusal.setDefusalMode(!!(state.defusal && state.defusal.active));
     ReconIntel.logPlanUpdate(null, state.semantic_plan);
+    renderApproachOverlay(state.approach || null);
     updateStatusBar(state);
     updateStalenessDom();
   }

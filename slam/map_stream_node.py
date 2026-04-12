@@ -263,6 +263,9 @@ class MapStreamNode(Node):
         # Latest VLM result — merged into every broadcaster payload.
         self._vlm_result: dict = {}
         self._vlm_result_ts: float = 0.0
+        # Latest approach loop telemetry from recon_movement skill.
+        self._approach_state: dict = {}
+        self._approach_state_ts: float = 0.0
         # Semantic marker cache — recomputed only when _vlm_result_ts changes.
         self._cached_markers: list = []
         self._cached_markers_ts: float = 0.0
@@ -358,6 +361,9 @@ class MapStreamNode(Node):
             self.create_subscription(Image, depth_topic, self._depth_cb, 10)
         if camera_info_topic:
             self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, 10)
+        self.create_subscription(
+            String, "/recon/approach_state", self._approach_state_cb, 10
+        )
 
         # Actively poll slam_toolbox for the latest map every second.
         # The /map subscription only fires when slam_toolbox *decides* to
@@ -791,6 +797,16 @@ class MapStreamNode(Node):
         if info is not None:
             with self._lock:
                 self._camera_info = info
+
+    def _approach_state_cb(self, msg: String) -> None:
+        try:
+            import json as _json
+            data = _json.loads(msg.data)
+            with self._lock:
+                self._approach_state = data
+                self._approach_state_ts = time.time()
+        except Exception:
+            pass
 
     def get_image_b64(self) -> str | None:
         """Return the latest camera frame as base64, or None if no frame yet."""
@@ -1583,6 +1599,12 @@ async def serve(node: MapStreamNode, host: str, port: int, radar: RadarListener 
             if radar is not None:
                 payload["radar_targets"] = radar.get_world_targets(pose)
             payload["autonomy"] = node.get_planner_state()
+            # Approach telemetry — only include when fresh (within 2 s).
+            with node._lock:
+                ap_state = dict(node._approach_state)
+                ap_ts = node._approach_state_ts
+            if ap_state and (time.time() - ap_ts) < 2.0:
+                payload["approach"] = ap_state
             node._check_diagnostics()
             # Only consume the alert when there are clients — if no browser is
             # connected the alert would be cleared and permanently lost.

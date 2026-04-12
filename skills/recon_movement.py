@@ -244,6 +244,68 @@ def _get_bearing_rad(bbox: list) -> float:
     return (x_center - 500.0) / 500.0 * 0.6   # 0.6 = FOV/2 ≈ 1.2 rad / 2
 
 
+# ---------------------------------------------------------------------------
+# Approach state publisher  (real-time telemetry → /recon/approach_state)
+# ---------------------------------------------------------------------------
+
+_approach_pub_node = None
+_approach_pub = None
+
+
+def _try_start_approach_publisher() -> None:
+    global _approach_pub_node, _approach_pub
+    if _approach_pub is not None:
+        return
+    try:
+        import rclpy                           # noqa: PLC0415
+        from std_msgs.msg import String        # noqa: PLC0415
+
+        if not rclpy.ok():
+            return
+
+        node = rclpy.create_node("recon_movement_approach_pub")
+        pub = node.create_publisher(String, "/recon/approach_state", 10)
+        t = threading.Thread(
+            target=lambda: rclpy.spin(node),
+            daemon=True,
+            name="recon_approach_pub_spin",
+        )
+        t.start()
+        _approach_pub_node = node
+        _approach_pub = pub
+    except Exception:
+        pass
+
+
+def _publish_approach_state(
+    bbox: list,
+    depth_m: float | None,
+    bearing_rad: float,
+    action: str,
+    lidar_fwd_m: float | None,
+) -> None:
+    """Publish approach loop telemetry for dashboard visualisation."""
+    _try_start_approach_publisher()
+    if _approach_pub is None:
+        return
+    try:
+        import json as _json                   # noqa: PLC0415
+        from std_msgs.msg import String as _S  # noqa: PLC0415
+
+        msg = _S()
+        msg.data = _json.dumps({
+            "bbox": bbox,
+            "depth_m":      round(depth_m, 3) if depth_m is not None else None,
+            "bearing_rad":  round(bearing_rad, 3),
+            "action":       action,
+            "lidar_fwd_m":  round(lidar_fwd_m, 2) if lidar_fwd_m is not None else None,
+            "ts":           time.time(),
+        })
+        _approach_pub.publish(msg)
+    except Exception:
+        pass
+
+
 from vlm.planner import Planner, RobotCommand, bbox_to_bearing
 
 try:
@@ -654,6 +716,7 @@ class ReconMovementSkill(Skill):
                 self._feedback(f"Searching for {target}")
                 self._search_dir *= -1
                 dur = min(1.5, remaining)
+                _publish_approach_state([], None, 0.0, "searching", _get_min_forward_m())
                 self.mobility.send_cmd_vel(
                     0.0, SEARCH_SPIN_SPEED_RADPS * self._search_dir, dur
                 )
@@ -672,21 +735,25 @@ class ReconMovementSkill(Skill):
 
             # ── Arrival check ─────────────────────────────────────────────
             if depth is not None and depth <= CLOSE_M:
+                _publish_approach_state(bbox, depth, bearing, "arrived", _get_min_forward_m())
                 self._stop()
                 return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
             _, size_proxy = bbox_to_bearing(bbox)
             if size_proxy >= self._planner.CLOSE_ENOUGH:
+                _publish_approach_state(bbox, depth, bearing, "arrived", _get_min_forward_m())
                 self._stop()
                 return f"Arrived near {annotation.get('label', target)}", SkillResult.SUCCESS
 
             # ── Obstacle check ───────────────────────────────────────────
             fwd = _get_min_forward_m()
             if fwd is not None and fwd < _OBSTACLE_STOP_M:
+                _publish_approach_state(bbox, depth, bearing, "obstacle", fwd)
                 self._stop()
                 self._feedback(f"Obstacle {fwd:.2f}m ahead — stopping")
                 return f"Obstacle blocked approach to {target}", SkillResult.FAILURE
 
             # ── Orient then drive (one short step per loop iteration) ─────
+            fwd = _get_min_forward_m()
             dur = min(STEP_S, remaining)
             if abs(bearing) > ALIGN_TOL:
                 # Rotate to center the target; gentle forward motion while correcting.
@@ -698,6 +765,7 @@ class ReconMovementSkill(Skill):
                     f"Aligning to {target} "
                     f"(bearing={bearing:+.2f} rad, {dist_label})"
                 )
+                _publish_approach_state(bbox, depth, bearing, "aligning", fwd)
             else:
                 # Heading is good — drive straight; slow down when close.
                 if depth is not None:
@@ -708,6 +776,7 @@ class ReconMovementSkill(Skill):
                 angular_z = 0.0
                 dist_label = f"depth={depth:.2f}m" if depth is not None else f"size={size_proxy:.3f}"
                 self._feedback(f"Driving to {target} ({dist_label})")
+                _publish_approach_state(bbox, depth, bearing, "driving", fwd)
 
             self.mobility.send_cmd_vel(linear_x, angular_z, dur)
             self._sleep(dur)
