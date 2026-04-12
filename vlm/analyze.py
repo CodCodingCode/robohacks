@@ -258,10 +258,12 @@ def _normalize_annotations(raw_annotations: list) -> list:
         if len(bbox) != 4:
             continue
         bbox = [max(0, min(1000, int(v))) for v in bbox]
+        category = a.get("category", "object")
+        label = "bomb" if category == "threat" else a.get("label", "unknown")
         out.append({
-            "label": a.get("label", "unknown"),
+            "label": label,
             "bbox": bbox,
-            "category": a.get("category", "object"),
+            "category": category,
         })
     return out
 

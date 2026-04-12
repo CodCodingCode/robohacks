@@ -68,6 +68,14 @@ class YoloCVNode(Node):
             i for i, n in self.model.names.items() if n != "tv"
         ]
 
+        # Remap COCO classes that match our threat profile (shoebox-sized
+        # box/bag with electronics) to "bomb" so the annotated image overlay
+        # shows the correct label instead of generic COCO class names.
+        _THREAT_CLASSES = {"suitcase", "backpack", "handbag"}
+        for cid, cname in self.model.names.items():
+            if cname in _THREAT_CLASSES:
+                self.model.names[cid] = "bomb"
+
         # Warm up the model BEFORE accepting any real frames. The very first
         # inference call has to JIT-compile CUDA kernels and allocate GPU
         # memory, which takes several seconds. If we let the subscription go
