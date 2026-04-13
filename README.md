@@ -1,5 +1,6 @@
 # RECON -- Autonomous Bomb Disposal with VLM Intelligence
 
+> [Demo Link] (https://hackiterate.com/robohacks?tab=submissions)
 > Built at [RoboHacks 2026](https://events.ycombinator.com/RoboHacks) on the [Innate MARS](https://docs.innate.bot) platform.
 
 RECON turns a MARS robot into an autonomous bomb-disposal operator. It scouts rooms, detects threats and people using a vision-language model, evacuates civilians with voice warnings, navigates to suspicious devices, and guides an operator through wire-level defusal -- all from a real-time browser dashboard.
